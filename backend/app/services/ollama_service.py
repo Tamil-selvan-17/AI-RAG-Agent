@@ -20,6 +20,21 @@ from app.core.logging import logger
 _RETRYABLE_EXCEPTIONS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
 
 
+async def _safe_read_error_body(response: httpx.Response) -> str:
+    """Read an error response's body, even if it came from a streaming request.
+
+    A response obtained via `client.stream(...)` doesn't have its body buffered
+    automatically -- calling `.text` directly on it raises httpx.ResponseNotRead
+    if the body hasn't been read yet. This reads it safely first, falling back
+    to just the status code if reading fails too.
+    """
+    try:
+        await response.aread()
+        return response.text
+    except Exception:  # noqa: BLE001
+        return f"HTTP {response.status_code}"
+
+
 class OllamaService:
     """Async client for local Ollama embedding and chat generation."""
 
@@ -148,10 +163,14 @@ class OllamaService:
                 ),
             ) from exc
         except httpx.HTTPStatusError as exc:
-            logger.error(f"Ollama chat request failed: {exc.response.text}")
+            # Same fix as GeminiService: a streaming response's body isn't buffered
+            # automatically, so exc.response.text would raise httpx.ResponseNotRead
+            # and mask the real error. Read it safely first.
+            body_text = await _safe_read_error_body(exc.response)
+            logger.error(f"Ollama chat request failed ({exc.response.status_code}): {body_text}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Ollama chat request failed: {exc.response.text}",
+                detail=f"Ollama chat request failed: {body_text}",
             ) from exc
 
     @retry(

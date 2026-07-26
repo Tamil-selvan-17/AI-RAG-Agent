@@ -24,6 +24,22 @@ _RETRYABLE_EXCEPTIONS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProt
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
+async def _safe_read_error_body(response: httpx.Response) -> str:
+    """Read an error response's body, even if it came from a streaming request.
+
+    A response obtained via `client.stream(...)` doesn't have its body buffered
+    automatically -- calling `.text` directly on it raises httpx.ResponseNotRead
+    if the body hasn't been read yet, which would otherwise crash this exact
+    error-handling code instead of reporting the real error. This reads it
+    safely first, falling back to just the status code if reading fails too.
+    """
+    try:
+        await response.aread()
+        return response.text
+    except Exception:  # noqa: BLE001
+        return f"HTTP {response.status_code}"
+
+
 class GeminiService:
     """Async client for Google Gemini embeddings and chat generation (free tier)."""
 
@@ -164,10 +180,23 @@ class GeminiService:
                 detail="Gemini did not respond in time. Please try again.",
             ) from exc
         except httpx.HTTPStatusError as exc:
-            logger.error(f"Gemini chat request failed: {exc.response.text}")
+            # In streaming mode the response body isn't buffered automatically --
+            # accessing exc.response.text directly here raises httpx.ResponseNotRead
+            # and masks the real error. Read it safely first.
+            body_text = await _safe_read_error_body(exc.response)
+            logger.error(f"Gemini chat request failed ({exc.response.status_code}): {body_text}")
+
+            if exc.response.status_code == 429:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=(
+                        "Gemini's free-tier rate limit was hit (too many requests in a short "
+                        "time). Please wait a minute and try again."
+                    ),
+                ) from exc
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Gemini chat request failed: {exc.response.text}",
+                detail=f"Gemini chat request failed: {body_text}",
             ) from exc
 
     @retry(
