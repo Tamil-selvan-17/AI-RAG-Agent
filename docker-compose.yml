@@ -1,0 +1,48 @@
+# Docker Compose for the AI RAG Agent application layer only.
+#
+# Qdrant, Redis, and Ollama are assumed to already be running on the host
+# machine (per the project's local environment setup) and are reached via
+# host.docker.internal from inside these containers.
+#
+# Start with:  docker compose up --build
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-rag-backend
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_CHAT_MODEL: qwen2.5:7b
+      OLLAMA_EMBED_MODEL: bge-m3
+      QDRANT_HOST: host.docker.internal
+      QDRANT_PORT: 6333
+      QDRANT_GRPC_PORT: 6334
+      QDRANT_COLLECTION_NAME: documents
+      QDRANT_VECTOR_SIZE: 1024
+      REDIS_HOST: host.docker.internal
+      REDIS_PORT: 6379
+      UPLOAD_DIR: /app/documents
+      CORS_ORIGINS: "*"
+      LOG_LEVEL: INFO
+    volumes:
+      - ./documents:/app/documents
+      - ./backend/logs:/app/logs
+      - ./frontend:/frontend:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:1.27-alpine
+    container_name: ai-rag-frontend
+    ports:
+      - "5500:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    restart: unless-stopped

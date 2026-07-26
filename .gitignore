@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Environment
+.env.local
+.env.*.local
+
+# Logs
+backend/logs/
+*.log
+
+# Uploaded documents (runtime data, not source)
+documents/*
+!documents/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.pid
+
+# Node (if any tooling is added later)
+node_modules/

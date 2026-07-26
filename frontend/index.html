@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Archive — Local Document Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ============ SIDEBAR: LIBRARY ============ -->
+  <aside class="library">
+    <div class="library-header">
+      <div class="brand">
+        <span class="brand-mark">A</span>
+        <div class="brand-text">
+          <h1>Archive</h1>
+          <p>Local document assistant</p>
+        </div>
+      </div>
+      <div class="status-row" id="statusRow">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusLabel">Checking services…</span>
+      </div>
+    </div>
+
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.csv" hidden />
+      <p class="dropzone-title">Drop a document here</p>
+      <p class="dropzone-sub">or click to browse — PDF, DOCX, TXT, CSV</p>
+    </div>
+
+    <div class="upload-progress" id="uploadProgress" hidden>
+      <div class="upload-progress-track">
+        <div class="upload-progress-fill" id="uploadProgressFill"></div>
+      </div>
+      <p id="uploadProgressLabel">Uploading…</p>
+    </div>
+
+    <div class="library-list-header">
+      <span>Catalog</span>
+      <span class="library-list-header-right">
+        <span id="docCount">0 documents</span>
+        <button id="clearAllDocsBtn" class="btn-text-danger" title="Delete all documents">Clear all</button>
+      </span>
+    </div>
+
+    <div class="library-list" id="libraryList">
+      <div class="empty-state">
+        <p>No documents yet.</p>
+        <p class="empty-state-sub">Uploaded files will appear here once indexed.</p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN: READING ROOM ============ -->
+  <main class="reading-room">
+    <header class="room-header">
+      <div>
+        <h2>Reading room</h2>
+        <p id="conversationMeta">New conversation</p>
+      </div>
+      <button class="btn-ghost" id="clearBtn">Clear conversation</button>
+    </header>
+
+    <div class="chat-scroll" id="chatScroll">
+      <div class="welcome-card">
+        <p class="welcome-eyebrow">Ask anything about your documents</p>
+        <h3>What would you like to know?</h3>
+        <p class="welcome-sub">Upload a document on the left, then ask a question. Every answer is grounded in your files, with the exact passages cited below it.</p>
+      </div>
+    </div>
+
+    <form class="composer" id="composerForm">
+      <textarea
+        id="questionInput"
+        placeholder="Ask a question about your documents…"
+        rows="1"
+        maxlength="4000"
+      ></textarea>
+      <button type="submit" class="btn-send" id="sendBtn" aria-label="Send question">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      </button>
+    </form>
+  </main>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
