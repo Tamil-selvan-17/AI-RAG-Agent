@@ -37,6 +37,7 @@ class GeminiService:
         self.api_key = settings.gemini_api_key
         self.chat_model = settings.gemini_chat_model
         self.embed_model = settings.gemini_embed_model
+        self.embed_dimensions = settings.gemini_embed_dimensions
         self.timeout = settings.gemini_timeout_seconds
 
     def _client(self) -> httpx.AsyncClient:
@@ -66,6 +67,7 @@ class GeminiService:
         payload = {
             "model": f"models/{self.embed_model}",
             "content": {"parts": [{"text": text}]},
+            "outputDimensionality": self.embed_dimensions,
         }
 
         try:

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # ---- Gemini (used when ai_provider = "gemini") ----
     gemini_api_key: str = ""
     gemini_chat_model: str = "gemini-2.0-flash"
-    gemini_embed_model: str = "text-embedding-004"
+    gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768
     gemini_timeout_seconds: int = 60
 
