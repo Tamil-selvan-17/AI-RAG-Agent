@@ -40,6 +40,51 @@ async def _safe_read_error_body(response: httpx.Response) -> str:
         return f"HTTP {response.status_code}"
 
 
+def _describe_rate_limit(body_text: str) -> str:
+    """Build a specific, actionable message from Google's 429 error body.
+
+    Google's quota error responses include a `RetryInfo` detail with a
+    `retryDelay` (e.g. "23s") for short-lived per-minute limits, and often
+    name the specific quota metric that was exceeded (e.g. "PerDay" vs
+    "PerMinute") in the error message text. Surfacing these specifics is much
+    more useful than a generic "wait a minute" guess, since a daily quota
+    won't actually clear for hours.
+    """
+    try:
+        data = json.loads(body_text)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+
+    message = ""
+    retry_delay = None
+    if isinstance(data, dict):
+        error = data.get("error", {})
+        message = error.get("message", "") or ""
+        for detail in error.get("details", []):
+            if isinstance(detail, dict) and "retryDelay" in detail:
+                retry_delay = detail["retryDelay"]
+
+    is_daily = "PerDay" in message or "per day" in message.lower()
+
+    if is_daily:
+        return (
+            "Gemini's free-tier DAILY request limit has been used up for today. "
+            "This resets at midnight Pacific Time -- it won't help to wait just a "
+            "few minutes. Check your exact usage at https://aistudio.google.com/usage, "
+            "or switch to a different free model in GEMINI_CHAT_MODEL in the meantime."
+        )
+    if retry_delay:
+        return (
+            f"Gemini's free-tier rate limit was hit. Google says to retry in "
+            f"about {retry_delay}. Please wait and try again."
+        )
+    return (
+        "Gemini's free-tier rate limit was hit (too many requests in a short "
+        "time). Please wait a minute and try again, or check "
+        "https://aistudio.google.com/usage to see exactly which limit you hit."
+    )
+
+
 class GeminiService:
     """Async client for Google Gemini embeddings and chat generation (free tier)."""
 
@@ -189,10 +234,7 @@ class GeminiService:
             if exc.response.status_code == 429:
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=(
-                        "Gemini's free-tier rate limit was hit (too many requests in a short "
-                        "time). Please wait a minute and try again."
-                    ),
+                    detail=_describe_rate_limit(body_text),
                 ) from exc
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
