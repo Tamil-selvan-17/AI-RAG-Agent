@@ -20,7 +20,7 @@ No code changes are needed from you — this project already has a built-in `AI_
 3. Click **"Create API key"**
 4. Copy the key — you'll paste it into Render's environment variables in Step 5
 
-This one key covers both the chat model (`gemini-2.5-flash-lite`) and the embedding model (`gemini-embedding-001`).
+This one key covers both the chat model (`gemini-flash-lite-latest`) and the embedding model (`gemini-embedding-001`).
 
 ---
 
@@ -92,7 +92,7 @@ Your `.gitignore` already excludes `venv/`, `.env.local`, logs, and uploaded doc
    ```
    AI_PROVIDER=gemini
    GEMINI_API_KEY=<your key from Step 1>
-   GEMINI_CHAT_MODEL=gemini-2.5-flash-lite
+   GEMINI_CHAT_MODEL=gemini-flash-lite-latest
    GEMINI_EMBED_MODEL=gemini-embedding-001
    GEMINI_EMBED_DIMENSIONS=768
 
