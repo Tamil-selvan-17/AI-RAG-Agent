@@ -81,9 +81,15 @@ def _build_system_prompt(language_name: str | None = None) -> str:
     return (
         "You are an AI assistant. Answer only from provided context. "
         f"Today's date is {today}. When the context contains dates (e.g. employment "
-        "start dates, 'Present', durations), use today's date above to compute any "
-        "relative time spans (such as years of experience) accurately — do not rely "
-        "on your own assumption of the current date. "
+        "start dates, 'Present', durations), ALWAYS compute relative time spans (such as "
+        "years of experience) yourself using today's date above — do not rely on your own "
+        "assumption of the current date, and do not simply quote a summary phrase from the "
+        "document (e.g. a resume saying '3+ years of experience') as your final answer. "
+        "Documents are often written at an earlier point in time and such self-described "
+        "durations go stale; a literal start date (e.g. 'June 2022 - Present') is always "
+        "more reliable than a prose summary claim, so calculate the actual duration from "
+        "that start date to today's real date and use that calculated figure as the answer, "
+        "even if it differs from a phrase written in the document. "
         f"{language_rule} "
         "If the context does not contain enough information to answer the question, "
         "say so clearly instead of guessing. Cite specific details from the context "
@@ -214,16 +220,22 @@ class RagService:
         return document
 
     async def delete_all_documents(self) -> int:
-        """Delete every document: all vectors, all registry entries, and all files on disk."""
+        """Delete every document: all vectors, all registry entries, and all files on disk.
+
+        Wipes the entire Qdrant collection unconditionally rather than only deleting
+        vectors for documents the current registry knows about. This matters with
+        MEMORY_BACKEND=memory: the registry resets on every restart, but a persistent
+        Qdrant instance doesn't, so repeated uploads across restarts can leave orphaned
+        duplicate vectors that a registry-driven delete would never find or remove.
+        """
         documents = await self.redis_service.list_documents()
+
+        try:
+            await self.qdrant_service.wipe_collection()
+        except HTTPException as exc:
+            logger.warning(f"Could not fully wipe Qdrant collection: {exc.detail}")
+
         for document in documents:
-            try:
-                await self.qdrant_service.delete_document(document.document_id)
-            except HTTPException as exc:
-                logger.warning(
-                    f"Could not delete vectors for '{document.filename}' from Qdrant "
-                    f"(continuing with registry/file cleanup): {exc.detail}"
-                )
             await self.redis_service.delete_document(document.document_id)
             file_path = self.settings.upload_dir_path / document.filename
             if file_path.exists():
@@ -290,6 +302,7 @@ class RagService:
             )
             for r in results
         ]
+        sources = self._deduplicate_sources(sources)
 
         context = self._build_context(sources)
         recent_history = await self.redis_service.get_recent_context(conversation_id, max_turns=3)
@@ -400,6 +413,7 @@ class RagService:
             )
             for r in results
         ]
+        sources = self._deduplicate_sources(sources)
 
         if not sources:
             answer = (
@@ -453,6 +467,25 @@ class RagService:
 
     async def get_history(self, conversation_id: str) -> list[ChatTurn]:
         return await self.redis_service.get_conversation_history(conversation_id, limit=50)
+
+    @staticmethod
+    def _deduplicate_sources(sources: list[SourceReference]) -> list[SourceReference]:
+        """Drop sources with identical chunk text, keeping the first (highest-scoring) one.
+
+        Qdrant results are already sorted by score descending, so the first occurrence
+        of a given chunk_text is always the best-scoring copy. Duplicates can happen if
+        the same document gets uploaded more than once (e.g. across app restarts with a
+        non-persistent registry but a persistent vector store), which would otherwise
+        show the same passage 2-3 times as if they were independent supporting sources.
+        """
+        seen_text: set[str] = set()
+        unique: list[SourceReference] = []
+        for source in sources:
+            if source.chunk_text in seen_text:
+                continue
+            seen_text.add(source.chunk_text)
+            unique.append(source)
+        return unique
 
     @staticmethod
     def _build_context(sources: list[SourceReference]) -> str:

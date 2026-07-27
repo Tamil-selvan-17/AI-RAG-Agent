@@ -162,6 +162,31 @@ class QdrantService:
                 detail=f"Failed to delete document vectors: {exc}",
             ) from exc
 
+    async def wipe_collection(self) -> None:
+        """Drop and recreate the entire collection, deleting every vector unconditionally.
+
+        Unlike delete_document (which needs to know a specific document_id), this
+        clears everything regardless of what the app's memory/registry currently
+        tracks. This matters when using MEMORY_BACKEND=memory alongside a
+        persistent Qdrant instance: the registry forgets documents on every
+        restart, but Qdrant doesn't -- so repeated uploads across restarts can
+        silently accumulate orphaned duplicate vectors that a registry-driven
+        "delete all" would never find. This is the reliable full reset.
+        """
+        try:
+            exists = await self._client.collection_exists(self.collection_name)
+            if exists:
+                await self._client.delete_collection(self.collection_name)
+                logger.info(f"Dropped Qdrant collection '{self.collection_name}'")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Failed to drop Qdrant collection: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to clear vector store: {exc}",
+            ) from exc
+
+        await self.ensure_collection()
+
     async def count_points(self) -> int:
         try:
             result = await self._client.count(collection_name=self.collection_name, exact=True)
