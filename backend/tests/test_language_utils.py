@@ -16,6 +16,22 @@ def test_detects_english_with_typos():
     assert detect_language_name("how many year of exprence he have") == "English"
 
 
+def test_english_with_proper_noun_not_misdetected_as_norwegian():
+    # Regression test: langdetect previously returned "no" (Norwegian) for this
+    # exact real-world question due to the proper noun "tamilselvan" confusing
+    # its statistical model, which then leaked the raw code into the system
+    # prompt as a nonsensical instruction.
+    assert detect_language_name("tell me about tamilselvan in english") == "English"
+
+
+def test_english_with_proper_noun_not_misdetected_as_afrikaans():
+    # Regression test: langdetect previously returned "af" (Afrikaans) at
+    # 99.99% reported confidence for this exact question -- confidence
+    # thresholding alone would not have caught this, hence the stopword
+    # heuristic gate for Latin-script text.
+    assert detect_language_name("what skills does tamilselvan have") == "English"
+
+
 def test_detects_tamil():
     assert detect_language_name("எத்தனை ஆண்டு அனுபவம் உள்ளது") == "Tamil"
 
