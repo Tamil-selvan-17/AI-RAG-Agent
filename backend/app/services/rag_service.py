@@ -10,6 +10,7 @@ Memory:     persist each turn to Redis; use recent turns as extra context
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import HTTPException, status
 
@@ -23,6 +24,7 @@ from app.services.document_service import DocumentService
 from app.services.embedding_service import EmbeddingService
 from app.services.qdrant_service import QdrantService
 from app.services.redis_service import RedisService
+from app.services.rerank_service import rerank
 from app.utils.chitchat_utils import detect_smalltalk_reply
 from app.utils.file_utils import save_file_to_disk
 from app.utils.language_utils import detect_language_name
@@ -184,7 +186,43 @@ class RagService:
             ) from exc
 
     async def list_documents(self) -> list[Document]:
-        return await self.redis_service.list_documents()
+        documents = await self.redis_service.list_documents()
+        if documents:
+            return documents
+
+        # Registry is empty (e.g. after a restart with MEMORY_BACKEND=memory), but
+        # Qdrant may still hold real, previously-uploaded vectors. Rebuild the
+        # registry from Qdrant directly so those documents don't just disappear
+        # from the UI, and persist the rebuilt entries for future fast lookups.
+        rebuilt = await self.qdrant_service.list_documents_from_vectors()
+        if not rebuilt:
+            return []
+
+        logger.info(f"Rebuilt document registry from Qdrant: {len(rebuilt)} document(s) found")
+        restored: list[Document] = []
+        for entry in rebuilt:
+            filename = entry["filename"]
+            file_extension = Path(filename).suffix or ""
+            created_date_str = entry.get("created_date")
+            try:
+                created_date = datetime.fromisoformat(created_date_str) if created_date_str else datetime.now()
+            except ValueError:
+                created_date = datetime.now()
+
+            document = Document(
+                document_id=entry["document_id"],
+                filename=filename,
+                file_extension=file_extension,
+                file_size_bytes=0,  # unknown after a registry reset -- not stored in Qdrant payload
+                status=DocumentStatus.READY,
+                chunk_count=entry["chunk_count"],
+                created_date=created_date,
+            )
+            await self.redis_service.save_document(document)
+            restored.append(document)
+
+        restored.sort(key=lambda d: d.created_date, reverse=True)
+        return restored
 
     async def delete_document(self, document_id: str) -> Document:
         """Delete a single document: its vectors in Qdrant, its registry entry, and its file on disk.
@@ -286,11 +324,18 @@ class RagService:
         query_vector = await self.embedding_service.embed_text(question)
 
         await self.qdrant_service.ensure_collection()
-        results = await self.qdrant_service.search(
+        # Fetch a wider candidate pool than we'll actually use, then rerank down
+        # to top_k. Vector similarity alone can miss chunks that literally
+        # contain the question's specific terms (names, numbers) in favor of
+        # ones that are merely topically similar -- reranking with a lexical
+        # signal corrects for that.
+        candidate_pool_size = min(k * 4, 40)
+        candidates = await self.qdrant_service.search(
             query_vector=query_vector,
-            top_k=k,
+            top_k=candidate_pool_size,
             score_threshold=self.settings.rag_score_threshold,
         )
+        results = rerank(question, candidates, top_k=k)
 
         sources = [
             SourceReference(
@@ -394,11 +439,13 @@ class RagService:
         try:
             query_vector = await self.embedding_service.embed_text(question)
             await self.qdrant_service.ensure_collection()
-            results = await self.qdrant_service.search(
+            candidate_pool_size = min(k * 4, 40)
+            candidates = await self.qdrant_service.search(
                 query_vector=query_vector,
-                top_k=k,
+                top_k=candidate_pool_size,
                 score_threshold=self.settings.rag_score_threshold,
             )
+            results = rerank(question, candidates, top_k=k)
         except HTTPException as exc:
             yield {"type": "error", "detail": exc.detail}
             return

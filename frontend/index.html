@@ -7,6 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
 </head>
 <body>
 
@@ -73,6 +75,22 @@
         <h3>What would you like to know?</h3>
         <p class="welcome-sub">Upload a document on the left, then ask a question. Every answer is grounded in your files, with the exact passages cited below it.</p>
       </div>
+    </div>
+
+    <div class="lang-row">
+      <label for="languageSelect">Answer language</label>
+      <select id="languageSelect">
+        <option value="English" selected>English (default)</option>
+        <option value="">Match question's language</option>
+        <option value="Tamil">Tamil</option>
+        <option value="Hindi">Hindi</option>
+        <option value="Spanish">Spanish</option>
+        <option value="French">French</option>
+        <option value="German">German</option>
+        <option value="Chinese (Simplified)">Chinese (Simplified)</option>
+        <option value="Japanese">Japanese</option>
+        <option value="Arabic">Arabic</option>
+      </select>
     </div>
 
     <form class="composer" id="composerForm">

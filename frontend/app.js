@@ -26,6 +26,7 @@ const chatScroll = document.getElementById('chatScroll');
 const composerForm = document.getElementById('composerForm');
 const questionInput = document.getElementById('questionInput');
 const sendBtn = document.getElementById('sendBtn');
+const languageSelect = document.getElementById('languageSelect');
 const clearBtn = document.getElementById('clearBtn');
 const conversationMeta = document.getElementById('conversationMeta');
 
@@ -232,12 +233,14 @@ composerForm.addEventListener('submit', async (e) => {
 });
 
 async function streamAnswer(question, wrapEl) {
+  const selectedLanguage = languageSelect.value || null;
   const res = await fetch(`${API_BASE}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       question,
       conversation_id: state.conversationId,
+      response_language: selectedLanguage,
     }),
   });
 
@@ -324,6 +327,17 @@ function appendLoadingAnswer() {
   return wrap;
 }
 
+function renderMarkdown(text) {
+  // marked + DOMPurify are loaded via CDN in index.html. Fall back to plain
+  // escaped text if either failed to load (e.g. offline), so the app never
+  // breaks -- it just shows literal markdown syntax instead of rendered HTML.
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+    return escapeHtml(text);
+  }
+  const rawHtml = marked.parse(text, { breaks: true });
+  return DOMPurify.sanitize(rawHtml);
+}
+
 function renderAnswerContent(wrapEl, answer, sources) {
   let sourcesHtml = '';
   if (sources && sources.length > 0) {
@@ -343,7 +357,7 @@ function renderAnswerContent(wrapEl, answer, sources) {
   }
 
   wrapEl.innerHTML = `
-    <div class="msg-answer">${escapeHtml(answer)}</div>
+    <div class="msg-answer">${renderMarkdown(answer)}</div>
     ${sourcesHtml}
   `;
   chatScroll.scrollTop = chatScroll.scrollHeight;

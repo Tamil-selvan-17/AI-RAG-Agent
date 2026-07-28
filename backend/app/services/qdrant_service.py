@@ -162,6 +162,56 @@ class QdrantService:
                 detail=f"Failed to delete document vectors: {exc}",
             ) from exc
 
+    async def list_documents_from_vectors(self) -> list[dict]:
+        """Reconstruct the document list directly from what's actually stored in Qdrant.
+
+        Used as a fallback/self-healing path when the app's registry (Redis or
+        in-memory) has no record of a document -- e.g. after a restart with
+        MEMORY_BACKEND=memory, where the registry resets but a persistent Qdrant
+        instance still holds every previously uploaded chunk. Without this, uploads
+        that succeeded in a past session would silently vanish from the UI's
+        document list forever, even though they're still fully searchable.
+        """
+        documents: dict[str, dict] = {}
+        offset = None
+
+        try:
+            while True:
+                points, offset = await self._client.scroll(
+                    collection_name=self.collection_name,
+                    limit=200,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    doc_id = payload.get("document_id")
+                    if not doc_id:
+                        continue
+                    entry = documents.setdefault(
+                        doc_id,
+                        {
+                            "document_id": doc_id,
+                            "filename": payload.get("filename", "unknown"),
+                            "chunk_count": 0,
+                            "created_date": payload.get("created_date"),
+                        },
+                    )
+                    entry["chunk_count"] += 1
+                    # Keep the earliest created_date seen for this document.
+                    created = payload.get("created_date")
+                    if created and (not entry["created_date"] or created < entry["created_date"]):
+                        entry["created_date"] = created
+
+                if offset is None:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Failed to rebuild document list from Qdrant: {exc}")
+            return []
+
+        return list(documents.values())
+
     async def wipe_collection(self) -> None:
         """Drop and recreate the entire collection, deleting every vector unconditionally.
 
