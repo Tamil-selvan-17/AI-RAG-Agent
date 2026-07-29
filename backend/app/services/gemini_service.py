@@ -11,6 +11,7 @@ Uses Google's Generative Language API (https://ai.google.dev), free tier,
 via a Google AI Studio API key.
 """
 
+import base64
 import json
 
 import httpx
@@ -269,6 +270,83 @@ class GeminiService:
                 detail="Gemini returned an empty chat response",
             )
         return content
+
+    async def describe_image(self, image_bytes: bytes, mime_type: str) -> str:
+        """Generate a rich text description of an image, including any visible text (OCR-like).
+
+        This is what makes uploaded images searchable through the same RAG pipeline
+        as text documents: the returned description is chunked and embedded exactly
+        like extracted PDF/DOCX text, so a question like "what does the chart show"
+        or "what does this screenshot say" can retrieve it normally.
+        """
+        self._require_api_key()
+
+        url = f"/models/{self.chat_model}:generateContent"
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": (
+                                "Describe this image in detail for a search index. Include: "
+                                "(1) a thorough description of what the image shows, "
+                                "(2) a verbatim transcription of any visible text, numbers, "
+                                "labels, or data (OCR), and (3) the type of image (photo, "
+                                "screenshot, chart, diagram, document scan, etc.). Be "
+                                "comprehensive and factual -- do not speculate about anything "
+                                "not actually visible in the image."
+                            )
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": base64.b64encode(image_bytes).decode("ascii"),
+                            }
+                        },
+                    ],
+                }
+            ],
+        }
+
+        try:
+            async with self._client() as client:
+                response = await client.post(url, params={"key": self.api_key}, json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.ConnectError as exc:
+            logger.error(f"Cannot reach Gemini API: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Cannot reach the Gemini API. Check your internet connection.",
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            body_text = await _safe_read_error_body(exc.response)
+            logger.error(f"Gemini image description request failed ({exc.response.status_code}): {body_text}")
+            if exc.response.status_code == 429:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=_describe_rate_limit(body_text),
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Gemini image description request failed: {body_text}",
+            ) from exc
+
+        try:
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini returned an unexpected response format for image description",
+            ) from exc
+
+        if not text or not text.strip():
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini returned an empty image description",
+            )
+        return text.strip()
 
     async def check_health(self) -> bool:
         """Return True if the Gemini API is reachable and the API key is accepted."""

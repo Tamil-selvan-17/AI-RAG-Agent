@@ -12,7 +12,26 @@ from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import get_settings
 
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv"}
+DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+ALLOWED_EXTENSIONS = DOCUMENT_EXTENSIONS | IMAGE_EXTENSIONS
+
+_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
+
+def is_image_extension(extension: str) -> bool:
+    return extension.lower() in IMAGE_EXTENSIONS
+
+
+def image_mime_type(extension: str) -> str:
+    return _IMAGE_MIME_TYPES.get(extension.lower(), "application/octet-stream")
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.\-]")
 

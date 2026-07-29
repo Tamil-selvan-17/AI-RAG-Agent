@@ -16,7 +16,13 @@ from fastapi import HTTPException, status
 
 from app.core.config import get_settings
 from app.core.logging import logger
-from app.core.security import generate_document_id, sanitize_filename, validate_extension
+from app.core.security import (
+    generate_document_id,
+    image_mime_type,
+    is_image_extension,
+    sanitize_filename,
+    validate_extension,
+)
 from app.models.chat import ChatTurn, SourceReference
 from app.models.document import Document, DocumentStatus
 from app.services.chunking_service import ChunkingService
@@ -26,7 +32,7 @@ from app.services.qdrant_service import QdrantService
 from app.services.redis_service import RedisService
 from app.services.rerank_service import rerank
 from app.utils.chitchat_utils import detect_smalltalk_reply
-from app.utils.file_utils import save_file_to_disk
+from app.utils.file_utils import clean_text, save_file_to_disk
 from app.utils.language_utils import detect_language_name
 
 
@@ -143,7 +149,23 @@ class RagService:
         try:
             file_path = save_file_to_disk(self.settings.upload_dir_path, safe_name, contents)
 
-            text = self.document_service.extract_text(file_path, extension)
+            if is_image_extension(extension):
+                # Images have no local text to extract -- describe/OCR them via the
+                # active AI provider's vision capability instead, then treat that
+                # description as the document's text for chunking/embedding, so an
+                # uploaded image becomes searchable through the exact same RAG
+                # pipeline as any PDF or DOCX.
+                text = await self.llm_service.describe_image(
+                    contents, image_mime_type(extension)
+                )
+                text = clean_text(text)
+                if not text:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="No description could be generated for this image",
+                    )
+            else:
+                text = self.document_service.extract_text(file_path, extension)
 
             chunks = self.chunking_service.chunk_document(
                 text=text,

@@ -19,9 +19,12 @@ _rag_service = RagService()
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(file: UploadFile) -> DocumentUploadResponse:
     """
-    Upload a document (PDF, DOCX, TXT, or CSV).
+    Upload a document (PDF, DOCX, TXT, CSV) or an image (JPG, PNG, WEBP, GIF, BMP).
 
-    Runs the full ingestion pipeline: validate -> extract -> chunk -> embed -> store.
+    Images are described/OCR'd via the active AI provider's vision capability and
+    indexed the same way as extracted document text, so questions about an
+    uploaded image's content (including any visible text) can be answered
+    through the normal chat pipeline.
     """
     validate_extension(file.filename or "")
     contents = await validate_upload_size(file)

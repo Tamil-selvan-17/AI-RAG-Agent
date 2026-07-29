@@ -8,6 +8,7 @@ Thin async client around the local Ollama REST API for two purposes:
 All inference stays fully local; no external API calls are made.
 """
 
+import base64
 import json
 
 import httpx
@@ -200,6 +201,66 @@ class OllamaService:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Ollama returned an empty chat response",
+            )
+        return content
+
+    async def describe_image(self, image_bytes: bytes, mime_type: str) -> str:
+        """Generate a text description of an image via Ollama's vision-capable models.
+
+        Requires OLLAMA_CHAT_MODEL to be set to a vision-capable model (e.g. llava,
+        bakllava, moondream, qwen2.5-vl) -- a text-only model like the default
+        qwen2.5:7b will simply ignore the image data and produce an unrelated or
+        empty response. If you plan to upload images with AI_PROVIDER=ollama, pull
+        and configure a vision model first: `ollama pull llava`.
+        """
+        payload = {
+            "model": self.chat_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Describe this image in detail for a search index. Include a "
+                        "thorough description of what it shows, a verbatim transcription "
+                        "of any visible text/numbers/labels (OCR), and the type of image. "
+                        "Be factual -- do not speculate about anything not actually visible."
+                    ),
+                    "images": [base64.b64encode(image_bytes).decode("ascii")],
+                }
+            ],
+            "stream": False,
+        }
+
+        try:
+            async with self._client() as client:
+                response = await client.post("/api/chat", json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.ConnectError as exc:
+            logger.error(f"Cannot connect to Ollama at {self.base_url}: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Ollama service unavailable at {self.base_url}. Is Ollama running?",
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            body_text = await _safe_read_error_body(exc.response)
+            logger.error(f"Ollama image description request failed ({exc.response.status_code}): {body_text}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    f"Ollama couldn't process the image -- is {self.chat_model} a "
+                    f"vision-capable model? (e.g. `ollama pull llava`). Details: {body_text}"
+                ),
+            ) from exc
+
+        content = data.get("message", {}).get("content", "").strip()
+        if not content:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    f"Ollama returned an empty image description. {self.chat_model} may "
+                    "not support vision -- try `ollama pull llava` and set it as "
+                    "OLLAMA_CHAT_MODEL, or switch AI_PROVIDER to gemini for image support."
+                ),
             )
         return content
 
