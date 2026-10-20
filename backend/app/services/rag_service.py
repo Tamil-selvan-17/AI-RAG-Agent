@@ -159,6 +159,9 @@ class RagService:
         self.qdrant_service = qdrant_service or QdrantService()
         self.redis_service = redis_service or _default_memory_backend()
         self.llm_service = llm_service or _default_llm_backend()
+        # Limits how many uploads are parsed/embedded at once, so a burst of
+        # uploads doesn't flood the AI provider (or this machine's CPU).
+        self._ingestion_slots = asyncio.Semaphore(settings.max_concurrent_ingestions)
 
     # ------------------------------------------------------------------ #
     # Ingestion pipeline
@@ -167,8 +170,12 @@ class RagService:
     def _file_path(self, document: Document) -> Path:
         return self.settings.upload_dir_path / (document.stored_filename or document.filename)
 
-    async def ingest_document(self, original_filename: str, contents: bytes) -> Document:
-        """Full ingestion pipeline: validate -> save -> extract -> chunk -> embed -> store."""
+    async def register_upload(self, original_filename: str, contents: bytes) -> Document:
+        """Validate and save an upload, recording it as PROCESSING. Fast -- no parsing or AI calls.
+
+        The slow part (extract -> chunk -> embed -> store) is process_document, which the
+        upload route runs in the background so the HTTP request returns immediately.
+        """
         safe_name = sanitize_filename(original_filename)
         extension = validate_extension(safe_name)
         document_id = generate_document_id()
@@ -180,83 +187,126 @@ class RagService:
             file_size_bytes=len(contents),
             status=DocumentStatus.PROCESSING,
         )
+        # Stored under a per-document name so two uploads called "resume.pdf"
+        # never overwrite each other, and deleting one never removes the other's file.
+        # File I/O runs in a worker thread so it doesn't block the event loop.
+        file_path = await asyncio.to_thread(
+            save_file_to_disk,
+            self.settings.upload_dir_path,
+            f"{document_id}_{safe_name}",
+            contents,
+        )
+        document.stored_filename = file_path.name
         await self.redis_service.save_document(document)
+        return document
 
+    async def process_document(self, document: Document, contents: bytes) -> Document:
+        """Extract -> chunk -> embed -> store for a registered upload. Marks it READY or FAILED."""
+        async with self._ingestion_slots:
+            try:
+                return await self._process_document(document, contents)
+            except HTTPException as exc:
+                await self.redis_service.update_document_status(
+                    document.document_id, DocumentStatus.FAILED, error_message=exc.detail
+                )
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"Unexpected ingestion failure for '{document.filename}': {exc}")
+                await self.redis_service.update_document_status(
+                    document.document_id, DocumentStatus.FAILED, error_message=str(exc)
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to process document: {exc}",
+                ) from exc
+
+    async def process_document_in_background(self, document: Document, contents: bytes) -> None:
+        """Background-task wrapper: failures are recorded on the document, never raised."""
         try:
-            # Stored under a per-document name so two uploads called "resume.pdf"
-            # never overwrite each other, and deleting one never removes the other's file.
-            # File I/O and parsing run in a worker thread so a large PDF doesn't
-            # freeze the event loop (and every other user's request) while it's parsed.
-            file_path = await asyncio.to_thread(
-                save_file_to_disk,
-                self.settings.upload_dir_path,
-                f"{document_id}_{safe_name}",
-                contents,
-            )
-            document.stored_filename = file_path.name
-            await self.redis_service.save_document(document)
+            await self.process_document(document, contents)
+        except HTTPException as exc:
+            logger.warning(f"Background ingestion of '{document.filename}' failed: {exc.detail}")
 
-            if is_image_extension(extension):
-                # Images have no local text to extract -- describe/OCR them via the
-                # active AI provider's vision capability instead, then treat that
-                # description as the document's text for chunking/embedding, so an
-                # uploaded image becomes searchable through the exact same RAG
-                # pipeline as any PDF or DOCX.
-                text = await self.llm_service.describe_image(
-                    contents, image_mime_type(extension)
-                )
-                text = clean_text(text)
-                if not text:
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail="No description could be generated for this image",
-                    )
-            else:
-                text = await asyncio.to_thread(
-                    self.document_service.extract_text, file_path, extension
-                )
+    async def ingest_document(self, original_filename: str, contents: bytes) -> Document:
+        """Register and fully process an upload in one call (waits until it's searchable)."""
+        document = await self.register_upload(original_filename, contents)
+        return await self.process_document(document, contents)
 
-            chunks = self.chunking_service.chunk_document(
-                text=text,
-                document_id=document_id,
-                filename=safe_name,
-                extra_metadata={"source_path": str(file_path), "file_extension": extension},
-            )
-            if not chunks:
+    async def _process_document(self, document: Document, contents: bytes) -> Document:
+        extension = document.file_extension
+        file_path = self._file_path(document)
+
+        if is_image_extension(extension):
+            # Images have no local text to extract -- describe/OCR them via the
+            # active AI provider's vision capability instead, then treat that
+            # description as the document's text for chunking/embedding, so an
+            # uploaded image becomes searchable through the exact same RAG
+            # pipeline as any PDF or DOCX.
+            text = await self.llm_service.describe_image(contents, image_mime_type(extension))
+            text = clean_text(text)
+            if not text:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Document produced no usable chunks",
+                    detail="No description could be generated for this image",
                 )
+        else:
+            # Parsing a large PDF is CPU-bound; a worker thread keeps every other
+            # request responsive meanwhile.
+            text = await asyncio.to_thread(self.document_service.extract_text, file_path, extension)
 
-            await self.qdrant_service.ensure_collection()
+        chunks = self.chunking_service.chunk_document(
+            text=text,
+            document_id=document.document_id,
+            filename=document.filename,
+            extra_metadata={"source_path": str(file_path), "file_extension": extension},
+        )
+        if not chunks:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Document produced no usable chunks",
+            )
 
-            vectors = await self.embedding_service.embed_batch([c.chunk_text for c in chunks])
+        await self.qdrant_service.ensure_collection()
+        vectors = await self.embedding_service.embed_batch([c.chunk_text for c in chunks])
+        await self.qdrant_service.upsert_chunks(chunks, vectors)
 
-            await self.qdrant_service.upsert_chunks(chunks, vectors)
-
-            document.status = DocumentStatus.READY
-            document.chunk_count = len(chunks)
-            await self.redis_service.save_document(document)
-            # Cached "not found" / partial answers may now be wrong.
-            await self.redis_service.clear_answer_cache()
-
-            logger.info(f"Ingested document '{safe_name}' ({document_id}) with {len(chunks)} chunks")
+        # The user may have deleted the document while it was still processing.
+        # Don't resurrect it -- remove the vectors that were just stored instead.
+        if await self.redis_service.get_document(document.document_id) is None:
+            logger.info(f"'{document.filename}' was deleted during processing; discarding its vectors")
+            await self.qdrant_service.delete_document(document.document_id)
             return document
 
-        except HTTPException as exc:
+        document.status = DocumentStatus.READY
+        document.chunk_count = len(chunks)
+        await self.redis_service.save_document(document)
+        # Cached "not found" / partial answers may now be wrong.
+        await self.redis_service.clear_answer_cache()
+
+        logger.info(
+            f"Ingested document '{document.filename}' ({document.document_id}) with {len(chunks)} chunks"
+        )
+        return document
+
+    async def recover_interrupted_ingestions(self) -> int:
+        """Mark documents left PROCESSING by a previous process (restart/crash) as FAILED.
+
+        Background ingestion lives in the process, so a restart mid-upload would
+        otherwise leave the document stuck on "processing" forever.
+        """
+        interrupted = [
+            d for d in await self.redis_service.list_documents()
+            if d.status == DocumentStatus.PROCESSING
+        ]
+        for document in interrupted:
             await self.redis_service.update_document_status(
-                document_id, DocumentStatus.FAILED, error_message=exc.detail
+                document.document_id,
+                DocumentStatus.FAILED,
+                error_message="Processing was interrupted by a server restart. Please upload again.",
             )
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"Unexpected ingestion failure for '{safe_name}': {exc}")
-            await self.redis_service.update_document_status(
-                document_id, DocumentStatus.FAILED, error_message=str(exc)
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to process document: {exc}",
-            ) from exc
+        if interrupted:
+            logger.warning(f"Marked {len(interrupted)} interrupted upload(s) as failed")
+        return len(interrupted)
 
     async def list_documents(self) -> list[Document]:
         documents = await self.redis_service.list_documents()

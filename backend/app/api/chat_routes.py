@@ -2,10 +2,11 @@
 
 import json
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app.core.logging import logger
+from app.core.rate_limit import limit_chat_requests
 from app.schemas.chat_schema import (
     ChatHistoryResponse,
     ChatHistoryTurn,
@@ -13,15 +14,14 @@ from app.schemas.chat_schema import (
     ChatResponse,
     SourceReferenceResponse,
 )
+from app.services.container import get_rag_service
 from app.services.rag_service import RagService
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-_rag_service = RagService()
 
-
-@router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+@router.post("", response_model=ChatResponse, dependencies=[Depends(limit_chat_requests)])
+async def chat(request: ChatRequest, rag: RagService = Depends(get_rag_service)) -> ChatResponse:
     """Ask a question against the uploaded document knowledge base (waits for the full answer).
 
     Prefer POST /api/chat/stream from a browser -- it returns the same information but
@@ -32,7 +32,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     """
     logger.info(f"Chat request: '{request.question[:80]}' (conversation_id={request.conversation_id})")
 
-    conversation_id, answer, sources = await _rag_service.answer_question(
+    conversation_id, answer, sources = await rag.answer_question(
         question=request.question,
         conversation_id=request.conversation_id,
         top_k=request.top_k,
@@ -56,8 +56,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
     )
 
 
-@router.post("/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
+@router.post("/stream", dependencies=[Depends(limit_chat_requests)])
+async def chat_stream(
+    request: ChatRequest, rag: RagService = Depends(get_rag_service)
+) -> StreamingResponse:
     """Ask a question and stream the answer back as Server-Sent Events, token by token.
 
     Each event is one line of the form `data: {...}\\n\\n`, where the JSON payload is
@@ -77,7 +79,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
     )
 
     async def event_source():
-        async for event in _rag_service.stream_answer(
+        async for event in rag.stream_answer(
             question=request.question,
             conversation_id=request.conversation_id,
             top_k=request.top_k,
@@ -96,9 +98,11 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
 
 @router.get("/history/{conversation_id}", response_model=ChatHistoryResponse)
-async def get_chat_history(conversation_id: str) -> ChatHistoryResponse:
+async def get_chat_history(
+    conversation_id: str, rag: RagService = Depends(get_rag_service)
+) -> ChatHistoryResponse:
     """Retrieve the full conversation history for a given conversation_id."""
-    turns = await _rag_service.get_history(conversation_id)
+    turns = await rag.get_history(conversation_id)
     if not turns:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

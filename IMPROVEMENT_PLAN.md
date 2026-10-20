@@ -2,7 +2,7 @@
 
 Tracks the improvement work for the AI RAG Agent. `[x]` = done, `[ ]` = pending.
 
-## Phase 1 — Login, sources UI, critical bugs, security (in progress)
+## Phase 1 — Login, sources UI, critical bugs, security (done)
 
 ### Login (single admin user, no database)
 - [x] `ADMIN_USERNAME` / `ADMIN_PASSWORD` settings (default `admin` / `P@ss@123`), compared in constant time
@@ -37,13 +37,16 @@ Tracks the improvement work for the AI RAG Agent. `[x]` = done, `[ ]` = pending.
 - [x] Reranker understands non-English words (Tamil, Hindi, ...)
 - [x] `answer_question` / `stream_answer` share one retrieval path (no duplicated logic)
 
-## Phase 2 — Scalability
-- [ ] Background ingestion (return 202, UI polls `processing -> ready`)
-- [ ] Shared `httpx.AsyncClient` per provider (connection reuse)
-- [ ] Services created once at startup and injected with `Depends`
-- [ ] Redis `MGET` for document list; size/TTL limits on the in-memory store
-- [ ] Rate limiting on `/api/chat`
-- [ ] Separate `/health/live` endpoint for host pings
+## Phase 2 — Scalability (done)
+- [x] Background ingestion: upload returns 202, UI polls `processing -> ready/failed` (`?wait=true` for scripts)
+- [x] At most `MAX_CONCURRENT_INGESTIONS` uploads processed at once; deleting during processing is safe
+- [x] Uploads interrupted by a restart are marked failed at startup (no stuck "processing")
+- [x] Shared `httpx.AsyncClient` per provider (connection reuse), closed on shutdown
+- [x] Services created once at startup and injected with `Depends` (also fixes: with
+      `MEMORY_BACKEND=memory` the upload and chat routes used to have separate stores)
+- [x] Redis `MGET` for document list; size/TTL limits on the in-memory store
+- [x] Rate limiting on `/api/chat` (`CHAT_RATE_LIMIT_PER_MINUTE`, per client IP)
+- [x] `/health/live` endpoint for host pings (no backend calls)
 
 ## Phase 3 — Answer quality
 - [ ] Evaluation set (20-30 question -> expected chunk) + hit-rate script

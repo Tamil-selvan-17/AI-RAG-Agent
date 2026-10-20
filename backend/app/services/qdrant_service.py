@@ -270,6 +270,9 @@ class QdrantService:
             logger.error(f"Failed to count Qdrant points: {exc}")
             return 0
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def check_health(self) -> bool:
         try:
             await self._client.get_collections()

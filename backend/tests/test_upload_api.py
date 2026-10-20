@@ -3,17 +3,31 @@
 import io
 
 
-def test_upload_valid_txt_file(client):
+def test_upload_returns_immediately_and_indexes_in_background(client, mock_services):
     file_content = b"This is a sample document used for testing the upload pipeline."
     response = client.post(
         "/api/documents/upload",
         files={"file": ("sample.txt", io.BytesIO(file_content), "text/plain")},
     )
-    assert response.status_code == 201
+    assert response.status_code == 202
     body = response.json()
     assert body["filename"] == "sample.txt"
+    assert body["status"] == "processing"
+    # TestClient runs background tasks before returning; the work was scheduled.
+    mock_services.process_document_in_background.assert_awaited_once()
+    mock_services.process_document.assert_not_awaited()
+
+
+def test_upload_with_wait_processes_synchronously(client, mock_services):
+    response = client.post(
+        "/api/documents/upload?wait=true",
+        files={"file": ("sample.txt", io.BytesIO(b"some text"), "text/plain")},
+    )
+    assert response.status_code == 201
+    body = response.json()
     assert body["status"] == "ready"
     assert body["chunk_count"] == 3
+    mock_services.process_document_in_background.assert_not_awaited()
 
 
 def test_upload_rejects_unsupported_extension(client):

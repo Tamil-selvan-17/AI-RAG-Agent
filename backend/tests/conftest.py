@@ -10,27 +10,52 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import main as main_module  # noqa: E402
-from app.api import chat_routes, upload_routes  # noqa: E402
+from app.core.rate_limit import chat_limiter  # noqa: E402
 from app.models.document import Document, DocumentStatus  # noqa: E402
+from app.services.container import get_rag_service  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_services(monkeypatch):
+    """Start the app with mocked backends so tests never contact real Redis/Qdrant/AI."""
+    from app.services.container import Services
+    from app.services.memory_store_service import MemoryStoreService
+
+    def fake_build_services() -> Services:
+        llm = AsyncMock()
+        qdrant = AsyncMock()
+        return Services(llm=llm, memory=MemoryStoreService(), qdrant=qdrant, rag=AsyncMock())
+
+    monkeypatch.setattr(main_module, "build_services", fake_build_services)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    chat_limiter.reset()
+    yield
+    chat_limiter.reset()
 
 
 @pytest.fixture
-def mock_services(monkeypatch):
-    """Patch the module-level service singletons used by the routers with async mocks."""
+def mock_services():
+    """Replace the shared RagService the routes depend on with an async mock."""
 
     rag_mock = AsyncMock()
 
-    async def fake_ingest(filename, contents):
+    async def fake_register(filename, contents):
         return Document(
             document_id="doc-123",
             filename=filename,
             file_extension=".txt",
             file_size_bytes=len(contents),
-            status=DocumentStatus.READY,
-            chunk_count=3,
+            status=DocumentStatus.PROCESSING,
         )
 
-    rag_mock.ingest_document.side_effect = fake_ingest
+    async def fake_process(document, contents):
+        return document.model_copy(update={"status": DocumentStatus.READY, "chunk_count": 3})
+
+    rag_mock.register_upload.side_effect = fake_register
+    rag_mock.process_document.side_effect = fake_process
     rag_mock.list_documents.return_value = [
         Document(
             document_id="doc-123",
@@ -68,10 +93,9 @@ def mock_services(monkeypatch):
 
     rag_mock.stream_answer = fake_stream_answer
 
-    monkeypatch.setattr(upload_routes, "_rag_service", rag_mock)
-    monkeypatch.setattr(chat_routes, "_rag_service", rag_mock)
-
-    return rag_mock
+    main_module.app.dependency_overrides[get_rag_service] = lambda: rag_mock
+    yield rag_mock
+    main_module.app.dependency_overrides.pop(get_rag_service, None)
 
 
 @pytest.fixture

@@ -71,6 +71,20 @@ async function loadDocuments() {
   } catch (err) {
     console.error(err);
   }
+  schedulePollIfProcessing();
+}
+
+// Uploads are indexed in the background, so keep refreshing the list while any
+// document is still "processing" until it turns "ready" (or "failed").
+let documentPollTimer = null;
+function schedulePollIfProcessing() {
+  const busy = state.documents.some(doc => doc.status === 'processing');
+  if (busy && !documentPollTimer) {
+    documentPollTimer = setTimeout(() => {
+      documentPollTimer = null;
+      loadDocuments();
+    }, 2000);
+  }
 }
 
 function renderLibrary() {
@@ -92,9 +106,10 @@ function renderLibrary() {
         <span class="doc-badge ${doc.status}">${doc.status}</span>
       </div>
       <div class="doc-card-bottom">
-        <p class="doc-meta">${doc.chunk_count} chunks · ${formatBytes(doc.file_size_bytes)}</p>
+        <p class="doc-meta">${doc.status === 'processing' ? 'Indexing…' : `${doc.chunk_count} chunks`} · ${formatBytes(doc.file_size_bytes)}</p>
         <button class="doc-delete-btn" data-doc-id="${doc.document_id}" title="Delete this document">Delete</button>
       </div>
+      ${doc.status === 'failed' && doc.error_message ? `<p class="doc-error">${escapeHtml(doc.error_message)}</p>` : ''}
     </div>
   `).join('');
 
@@ -187,7 +202,7 @@ function uploadFile(file) {
       const pct = Math.round((e.loaded / e.total) * 100);
       uploadProgressFill.style.width = `${pct}%`;
       if (pct >= 100) {
-        uploadProgressLabel.textContent = 'Processing and indexing…';
+        uploadProgressLabel.textContent = 'Saving…';
       }
     }
   });

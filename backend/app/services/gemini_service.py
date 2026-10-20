@@ -13,6 +13,7 @@ via a Google AI Studio API key.
 
 import base64
 import json
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import HTTPException, status
@@ -124,14 +125,25 @@ class GeminiService:
         self.embed_model = settings.gemini_embed_model
         self.embed_dimensions = settings.gemini_embed_dimensions
         self.timeout = settings.gemini_timeout_seconds
+        self._http: httpx.AsyncClient | None = None
 
-    def _client(self) -> httpx.AsyncClient:
-        timeout = httpx.Timeout(connect=10.0, read=self.timeout, write=30.0, pool=10.0)
-        # The key goes in a header rather than the URL so it never ends up in
-        # request logs, proxy logs, or exception messages that include the URL.
-        return httpx.AsyncClient(
-            base_url=_API_BASE, timeout=timeout, headers={"x-goog-api-key": self.api_key}
-        )
+    @asynccontextmanager
+    async def _client(self):
+        """Yield this service's shared HTTP client (created on first use, reused after),
+        so TLS connections to Google are kept alive instead of re-opened per request."""
+        if self._http is None or self._http.is_closed:
+            timeout = httpx.Timeout(connect=10.0, read=self.timeout, write=30.0, pool=10.0)
+            # The key goes in a header rather than the URL so it never ends up in
+            # request logs, proxy logs, or exception messages that include the URL.
+            self._http = httpx.AsyncClient(
+                base_url=_API_BASE, timeout=timeout, headers={"x-goog-api-key": self.api_key}
+            )
+        yield self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     def _require_api_key(self) -> None:
         if not self.api_key:

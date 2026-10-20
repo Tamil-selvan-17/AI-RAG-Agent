@@ -302,6 +302,13 @@ body {
   flex-shrink: 0;
 }
 
+.doc-error {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+
 .doc-badge.ready { background: #E5F0E7; color: #3B6E49; }
 .doc-badge.processing { background: var(--clay-tint); color: var(--clay); }
 .doc-badge.failed { background: var(--danger-tint); color: var(--danger); }

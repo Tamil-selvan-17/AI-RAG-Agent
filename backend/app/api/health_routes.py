@@ -2,11 +2,11 @@
 
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.core.config import get_settings
 from app.core.logging import logger
-from app.services.qdrant_service import QdrantService
+from app.services.container import Services, get_services
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -31,34 +31,29 @@ async def _cached_provider_check(provider_name: str, check_fn) -> bool:
     return result
 
 
+@router.get("/live")
+async def liveness() -> dict:
+    """Instant liveness probe: no calls to any backing service.
+
+    Point your host's health check (Render, Docker HEALTHCHECK, k8s liveness)
+    here. Use GET /health for the full dependency check.
+    """
+    return {"status": "alive"}
+
+
 @router.get("")
-async def health_check() -> dict:
+async def health_check(services: Services = Depends(get_services)) -> dict:
     """Report liveness of the API and connectivity to the AI provider, Qdrant, and memory backend."""
     settings = get_settings()
 
-    if settings.ai_provider == "gemini":
-        from app.services.gemini_service import GeminiService
+    provider_name = "gemini" if settings.ai_provider == "gemini" else "ollama"
+    provider_ok = await _cached_provider_check(provider_name, services.llm.check_health)
+    qdrant_ok = await services.qdrant.check_health()
 
-        provider_name = "gemini"
-        provider_ok = await _cached_provider_check("gemini", GeminiService().check_health)
-    else:
-        from app.services.ollama_service import OllamaService
-
-        provider_name = "ollama"
-        provider_ok = await _cached_provider_check("ollama", OllamaService().check_health)
-
-    qdrant_ok = await QdrantService().check_health()
-
-    if settings.memory_backend == "memory":
-        from app.services.memory_store_service import MemoryStoreService
-
-        memory_name = "memory (in-process, non-persistent)"
-        memory_ok = await MemoryStoreService().check_health()
-    else:
-        from app.services.redis_service import RedisService
-
-        memory_name = "redis"
-        memory_ok = await RedisService().check_health()
+    memory_name = (
+        "memory (in-process, non-persistent)" if settings.memory_backend == "memory" else "redis"
+    )
+    memory_ok = await services.memory.check_health()
 
     overall = "healthy" if all([provider_ok, qdrant_ok, memory_ok]) else "degraded"
 

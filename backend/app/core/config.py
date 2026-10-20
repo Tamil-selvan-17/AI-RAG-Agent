@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # questions using the conversation history before searching Qdrant. Costs one
     # extra (short) LLM call per follow-up question; first questions are unaffected.
     rag_query_rewrite: bool = True
+    # How many uploads may be parsed/embedded at the same time (others wait their turn).
+    max_concurrent_ingestions: int = 2
+
+    # ---- Rate limiting ----
+    # Max chat questions per client IP per minute (0 = unlimited). Protects the
+    # AI provider's quota (e.g. Gemini free tier) from runaway clients.
+    chat_rate_limit_per_minute: int = 20
 
     # ---- Auth (single admin user, no database) ----
     admin_username: str = "admin"

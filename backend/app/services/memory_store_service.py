@@ -14,12 +14,20 @@ the actual chunk vectors remain safely in Qdrant.
 
 import hashlib
 import json
+import time
 import uuid
-from collections import defaultdict
+from collections import OrderedDict
 
 from app.core.logging import logger
 from app.models.chat import ChatTurn
 from app.models.document import Document, DocumentStatus
+
+# Bounds so a long-running process can't grow without limit. The least recently
+# used conversations / cache entries are dropped first. Cache TTL matches Redis.
+_MAX_CONVERSATIONS = 1000
+_MAX_TURNS_PER_CONVERSATION = 100
+_MAX_CACHE_ENTRIES = 500
+_CACHE_TTL_SECONDS = 3600
 
 
 class MemoryStoreService:
@@ -32,9 +40,9 @@ class MemoryStoreService:
             "whenever this process restarts. Set MEMORY_BACKEND=redis with a "
             "REDIS_URL/host for persistence instead."
         )
-        self._conversations: dict[str, list[ChatTurn]] = defaultdict(list)
+        self._conversations: OrderedDict[str, list[ChatTurn]] = OrderedDict()
         self._documents: dict[str, Document] = {}
-        self._cache: dict[str, dict] = {}
+        self._cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 
     # ------------------------------------------------------------------ #
     # Conversation memory
@@ -45,10 +53,15 @@ class MemoryStoreService:
         return str(uuid.uuid4())
 
     async def append_chat_turn(self, turn: ChatTurn) -> None:
-        self._conversations[turn.conversation_id].append(turn)
+        turns = self._conversations.setdefault(turn.conversation_id, [])
+        turns.append(turn)
+        del turns[:-_MAX_TURNS_PER_CONVERSATION]
+        self._conversations.move_to_end(turn.conversation_id)
+        while len(self._conversations) > _MAX_CONVERSATIONS:
+            self._conversations.popitem(last=False)
 
     async def get_conversation_history(self, conversation_id: str, limit: int = 20) -> list[ChatTurn]:
-        return self._conversations.get(conversation_id, [])[-limit:]
+        return list(self._conversations.get(conversation_id, [])[-limit:])
 
     async def get_recent_context(self, conversation_id: str, max_turns: int = 3) -> str:
         turns = await self.get_conversation_history(conversation_id, limit=max_turns)
@@ -100,14 +113,24 @@ class MemoryStoreService:
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     async def get_cached_answer(self, question: str, language: str | None = None) -> dict | None:
-        cached = self._cache.get(self._cache_key(question, language))
-        if cached is None:
+        key = self._cache_key(question, language)
+        entry = self._cache.get(key)
+        if entry is None:
             return None
+        stored_at, payload = entry
+        if time.monotonic() - stored_at > _CACHE_TTL_SECONDS:
+            del self._cache[key]
+            return None
+        self._cache.move_to_end(key)
         logger.debug(f"In-memory cache hit for question: {question[:50]}...")
-        return json.loads(json.dumps(cached))  # deep-ish copy to mirror Redis round-trip
+        return json.loads(json.dumps(payload))  # deep-ish copy to mirror Redis round-trip
 
     async def cache_answer(self, question: str, answer_payload: dict, language: str | None = None) -> None:
-        self._cache[self._cache_key(question, language)] = answer_payload
+        key = self._cache_key(question, language)
+        self._cache[key] = (time.monotonic(), answer_payload)
+        self._cache.move_to_end(key)
+        while len(self._cache) > _MAX_CACHE_ENTRIES:
+            self._cache.popitem(last=False)
 
     async def clear_answer_cache(self) -> None:
         self._cache.clear()

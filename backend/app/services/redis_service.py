@@ -138,11 +138,13 @@ class RedisService:
                 detail=f"Failed to list documents: {exc}",
             ) from exc
 
-        documents: list[Document] = []
-        for doc_id in document_ids:
-            doc = await self.get_document(doc_id)
-            if doc:
-                documents.append(doc)
+        if not document_ids:
+            return []
+        # One round trip for all documents instead of one GET per document.
+        raw_documents = await self._client.mget(
+            [f"{_DOCUMENT_KEY_PREFIX}{doc_id}" for doc_id in document_ids]
+        )
+        documents = [Document.model_validate_json(raw) for raw in raw_documents if raw]
         documents.sort(key=lambda d: d.created_date, reverse=True)
         return documents
 
@@ -187,6 +189,9 @@ class RedisService:
     # ------------------------------------------------------------------ #
     # Health
     # ------------------------------------------------------------------ #
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     async def check_health(self) -> bool:
         try:

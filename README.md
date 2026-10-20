@@ -201,22 +201,30 @@ All `/api/documents` and `/api/chat` endpoints require login: call `POST /api/au
 `{"username": "...", "password": "..."}`, then send the returned `access_token` as
 `Authorization: Bearer <token>`. `/health` stays public. Five failed logins from one IP lock login for 5 minutes.
 
+Chat endpoints are rate limited per client IP (`CHAT_RATE_LIMIT_PER_MINUTE`, default 20; `0` disables) and return
+`429` with a `Retry-After` header when exceeded.
+
 ### `POST /api/documents/upload`
-Upload a document (`multipart/form-data`, field name `file`). Accepts `.pdf`, `.docx`, `.txt`, `.csv`, up to 50MB.
+Upload a document (`multipart/form-data`, field name `file`). Accepts `.pdf`, `.docx`, `.txt`, `.csv` and images, up to 50MB.
+
+The request returns immediately with **`202 Accepted`** and `"status": "processing"`; indexing continues in the
+background. Poll `GET /api/documents` until the document's status is `ready` (or `failed`, with `error_message`).
+Add `?wait=true` to block until processing finishes instead (returns `201`, as before).
 
 ```bash
 curl -X POST http://localhost:8000/api/documents/upload \
+  -H "Authorization: Bearer $TOKEN" \
   -F "file=@./contract.pdf"
 ```
 
-Response `201`:
+Response `202`:
 ```json
 {
   "document_id": "b3f1c2a4-...",
   "filename": "contract.pdf",
-  "status": "ready",
-  "chunk_count": 42,
-  "message": "Document processed successfully into 42 chunks"
+  "status": "processing",
+  "chunk_count": 0,
+  "message": "Upload received; the document is being indexed in the background"
 }
 ```
 
@@ -277,6 +285,9 @@ Retrieve the stored turns for a conversation. Returns `404` if no history exists
 ```bash
 curl http://localhost:8000/api/chat/history/9c8a7b6d-...
 ```
+
+### `GET /health/live`
+Instant liveness probe that calls no backing services — point your host's health check (Render, Docker) here.
 
 ### `GET /health`
 Reports connectivity to Ollama, Qdrant, and Redis.

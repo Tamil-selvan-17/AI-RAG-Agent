@@ -10,6 +10,7 @@ All inference stays fully local; no external API calls are made.
 
 import base64
 import json
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import HTTPException, status
@@ -35,13 +36,27 @@ class OllamaService:
         self.embed_model = settings.ollama_embed_model
         self.chat_model = settings.ollama_chat_model
         self.timeout = settings.ollama_timeout_seconds
+        self._http: httpx.AsyncClient | None = None
 
-    def _client(self) -> httpx.AsyncClient:
-        # Read timeout applies per network read. For streaming responses this means
-        # "seconds allowed between tokens", not total generation time -- so a slow
-        # multi-minute answer no longer fails as long as tokens keep arriving.
-        timeout = httpx.Timeout(connect=10.0, read=self.timeout, write=30.0, pool=10.0)
-        return httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+    @asynccontextmanager
+    async def _client(self):
+        """Yield this service's shared HTTP client (created on first use, reused after).
+
+        Reusing one client keeps connections to Ollama alive between requests
+        instead of opening a new TCP connection for every embedding/chat call.
+        """
+        if self._http is None or self._http.is_closed:
+            # Read timeout applies per network read. For streaming responses this means
+            # "seconds allowed between tokens", not total generation time -- so a slow
+            # multi-minute answer no longer fails as long as tokens keep arriving.
+            timeout = httpx.Timeout(connect=10.0, read=self.timeout, write=30.0, pool=10.0)
+            self._http = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+        yield self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     def _unavailable(self, exc: httpx.TransportError) -> TransientProviderError:
         logger.error(f"Cannot connect to Ollama at {self.base_url}: {exc}")

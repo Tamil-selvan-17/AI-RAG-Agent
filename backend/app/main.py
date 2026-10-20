@@ -17,7 +17,7 @@ from app.api import auth_routes, chat_routes, health_routes, upload_routes
 from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.logging import logger
-from app.services.qdrant_service import QdrantService
+from app.services.container import build_services
 
 settings = get_settings()
 
@@ -25,12 +25,19 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name} ({settings.app_env})")
+    services = build_services()
+    app.state.services = services
     try:
-        await QdrantService().ensure_collection()
+        await services.qdrant.ensure_collection()
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Qdrant not reachable at startup, will retry on first request: {exc}")
+    try:
+        await services.rag.recover_interrupted_ingestions()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not check for interrupted uploads at startup: {exc}")
     yield
     logger.info("Shutting down AI RAG Agent")
+    await services.aclose()
 
 
 app = FastAPI(
