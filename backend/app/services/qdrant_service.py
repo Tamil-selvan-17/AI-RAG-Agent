@@ -17,6 +17,10 @@ from app.core.config import get_settings
 from app.core.logging import logger
 from app.models.document import DocumentChunk
 
+# Collections whose vector size has already been checked against the active
+# embedding model in this process, so the check costs one call, not one per request.
+_verified_collections: set[str] = set()
+
 
 class QdrantService:
     """Async wrapper around the Qdrant client for the document collection."""
@@ -42,7 +46,9 @@ class QdrantService:
             )
 
     async def ensure_collection(self) -> None:
-        """Create the collection dynamically if it does not already exist."""
+        """Create the collection if missing; verify its vector size matches the embedding model."""
+        if self.collection_name in _verified_collections:
+            return
         try:
             exists = await self._client.collection_exists(self.collection_name)
             if not exists:
@@ -59,6 +65,24 @@ class QdrantService:
                     field_schema=models.PayloadSchemaType.KEYWORD,
                 )
                 logger.info(f"Created Qdrant collection '{self.collection_name}'")
+            else:
+                info = await self._client.get_collection(self.collection_name)
+                vectors = info.config.params.vectors
+                existing_size = getattr(vectors, "size", None)
+                if existing_size is not None and existing_size != self.vector_size:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=(
+                            f"Qdrant collection '{self.collection_name}' stores {existing_size}-dim "
+                            f"vectors, but the active embedding model produces {self.vector_size}-dim "
+                            "vectors (this happens after switching AI_PROVIDER or embedding model). "
+                            "Set QDRANT_COLLECTION_NAME to a new name for this model, or use "
+                            "'Clear all' to rebuild the collection and re-upload your documents."
+                        ),
+                    )
+            _verified_collections.add(self.collection_name)
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Failed to ensure Qdrant collection: {exc}")
             raise HTTPException(
@@ -227,6 +251,7 @@ class QdrantService:
             exists = await self._client.collection_exists(self.collection_name)
             if exists:
                 await self._client.delete_collection(self.collection_name)
+                _verified_collections.discard(self.collection_name)
                 logger.info(f"Dropped Qdrant collection '{self.collection_name}'")
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Failed to drop Qdrant collection: {exc}")

@@ -109,6 +109,9 @@ class MemoryStoreService:
     async def cache_answer(self, question: str, answer_payload: dict, language: str | None = None) -> None:
         self._cache[self._cache_key(question, language)] = answer_payload
 
+    async def clear_answer_cache(self) -> None:
+        self._cache.clear()
+
     # ------------------------------------------------------------------ #
     # Health
     # ------------------------------------------------------------------ #

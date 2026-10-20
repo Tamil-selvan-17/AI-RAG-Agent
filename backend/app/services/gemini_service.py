@@ -16,29 +16,19 @@ import json
 
 import httpx
 from fastapi import HTTPException, status
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
 from app.core.logging import logger
+from app.services.provider_errors import (
+    TransientProviderError,
+    parse_retry_delay,
+    provider_retry,
+    safe_read_error_body,
+)
 
-_RETRYABLE_EXCEPTIONS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
-
-async def _safe_read_error_body(response: httpx.Response) -> str:
-    """Read an error response's body, even if it came from a streaming request.
-
-    A response obtained via `client.stream(...)` doesn't have its body buffered
-    automatically -- calling `.text` directly on it raises httpx.ResponseNotRead
-    if the body hasn't been read yet, which would otherwise crash this exact
-    error-handling code instead of reporting the real error. This reads it
-    safely first, falling back to just the status code if reading fails too.
-    """
-    try:
-        await response.aread()
-        return response.text
-    except Exception:  # noqa: BLE001
-        return f"HTTP {response.status_code}"
+# batchEmbedContents accepts at most 100 texts per request.
+_EMBED_BATCH_SIZE = 100
 
 
 def _describe_rate_limit(body_text: str) -> str:
@@ -86,6 +76,39 @@ def _describe_rate_limit(body_text: str) -> str:
     )
 
 
+def _http_error(exc: httpx.HTTPStatusError, body_text: str, what: str) -> HTTPException:
+    """Map a Gemini HTTP error to the right exception (transient errors get retried)."""
+    code = exc.response.status_code
+    if code == 429:
+        detail = _describe_rate_limit(body_text)
+        if "DAILY" in detail:
+            # Daily quota won't clear for hours -- retrying would only waste time.
+            return HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+        retry_after = None
+        try:
+            for item in json.loads(body_text).get("error", {}).get("details", []):
+                if isinstance(item, dict) and "retryDelay" in item:
+                    retry_after = parse_retry_delay(item["retryDelay"])
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+        return TransientProviderError(status.HTTP_429_TOO_MANY_REQUESTS, detail, retry_after)
+    if code >= 500:
+        return TransientProviderError(
+            status.HTTP_502_BAD_GATEWAY, f"Gemini {what} failed (HTTP {code}): {body_text}"
+        )
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Gemini {what} failed: {body_text}"
+    )
+
+
+def _connect_error(exc: httpx.TransportError) -> TransientProviderError:
+    logger.error(f"Cannot reach Gemini API: {exc}")
+    return TransientProviderError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "Cannot reach the Gemini API. Check your internet connection.",
+    )
+
+
 class GeminiService:
     """Async client for Google Gemini embeddings and chat generation (free tier)."""
 
@@ -104,7 +127,11 @@ class GeminiService:
 
     def _client(self) -> httpx.AsyncClient:
         timeout = httpx.Timeout(connect=10.0, read=self.timeout, write=30.0, pool=10.0)
-        return httpx.AsyncClient(base_url=_API_BASE, timeout=timeout)
+        # The key goes in a header rather than the URL so it never ends up in
+        # request logs, proxy logs, or exception messages that include the URL.
+        return httpx.AsyncClient(
+            base_url=_API_BASE, timeout=timeout, headers={"x-goog-api-key": self.api_key}
+        )
 
     def _require_api_key(self) -> None:
         if not self.api_key:
@@ -113,45 +140,41 @@ class GeminiService:
                 detail="GEMINI_API_KEY is not set. Add it to your environment variables.",
             )
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
-    )
-    async def generate_embedding(self, text: str) -> list[float]:
-        """Generate an embedding vector for a single piece of text using Gemini."""
+    def _embed_request(self, text: str, task_type: str) -> dict:
+        return {
+            "model": f"models/{self.embed_model}",
+            "content": {"parts": [{"text": text}]},
+            "taskType": task_type,
+            "outputDimensionality": self.embed_dimensions,
+        }
+
+    async def _post_json(self, url: str, payload: dict, what: str) -> dict:
+        try:
+            async with self._client() as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+        except httpx.ConnectError as exc:
+            raise _connect_error(exc) from exc
+        except httpx.HTTPStatusError as exc:
+            body_text = await safe_read_error_body(exc.response)
+            logger.error(f"Gemini {what} failed ({exc.response.status_code}): {body_text}")
+            raise _http_error(exc, body_text, what) from exc
+        except httpx.TransportError as exc:  # read errors, dropped connections, etc.
+            raise _connect_error(exc) from exc
+
+    @provider_retry()
+    async def generate_embedding(self, text: str, task_type: str = "RETRIEVAL_QUERY") -> list[float]:
+        """Embed a single text. Defaults to the query task type (used for user questions)."""
         if not text or not text.strip():
             raise ValueError("Cannot generate an embedding for empty text")
         self._require_api_key()
 
-        url = f"/models/{self.embed_model}:embedContent"
-        payload = {
-            "model": f"models/{self.embed_model}",
-            "content": {"parts": [{"text": text}]},
-            "outputDimensionality": self.embed_dimensions,
-        }
-
-        try:
-            async with self._client() as client:
-                response = await client.post(
-                    url, params={"key": self.api_key}, json=payload
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.ConnectError as exc:
-            logger.error(f"Cannot reach Gemini API: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Cannot reach the Gemini API. Check your internet connection.",
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"Gemini embedding request failed: {exc.response.text}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Gemini embedding request failed: {exc.response.text}",
-            ) from exc
-
+        data = await self._post_json(
+            f"/models/{self.embed_model}:embedContent",
+            self._embed_request(text, task_type),
+            "embedding request",
+        )
         values = data.get("embedding", {}).get("values")
         if not values:
             raise HTTPException(
@@ -160,11 +183,28 @@ class GeminiService:
             )
         return values
 
+    @provider_retry()
+    async def _embed_batch_request(self, texts: list[str]) -> list[list[float]]:
+        data = await self._post_json(
+            f"/models/{self.embed_model}:batchEmbedContents",
+            {"requests": [self._embed_request(t, "RETRIEVAL_DOCUMENT") for t in texts]},
+            "batch embedding request",
+        )
+        embeddings = data.get("embeddings") or []
+        vectors = [e.get("values") for e in embeddings]
+        if len(vectors) != len(texts) or not all(vectors):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini returned an incomplete batch embedding response",
+            )
+        return vectors
+
     async def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts sequentially."""
+        """Embed document chunks, up to 100 per request (document task type)."""
+        self._require_api_key()
         vectors: list[list[float]] = []
-        for text in texts:
-            vectors.append(await self.generate_embedding(text))
+        for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+            vectors.extend(await self._embed_batch_request(texts[i : i + _EMBED_BATCH_SIZE]))
         return vectors
 
     async def stream_chat_response(
@@ -180,8 +220,8 @@ class GeminiService:
         the whole time, which is what actually prevents 504 Gateway Timeout
         errors from reverse proxies that give up on a silent request.
 
-        Not wrapped in @retry -- tenacity can't safely retry a generator that
-        has already yielded partial output to a caller.
+        Not retried here -- a generator that has already yielded partial output
+        to a caller can't be safely restarted.
         """
         self._require_api_key()
 
@@ -194,9 +234,7 @@ class GeminiService:
 
         try:
             async with self._client() as client:
-                async with client.stream(
-                    "POST", url, params={"key": self.api_key, "alt": "sse"}, json=payload
-                ) as response:
+                async with client.stream("POST", url, params={"alt": "sse"}, json=payload) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
                         if not line.startswith("data: "):
@@ -214,11 +252,7 @@ class GeminiService:
                             if text:
                                 yield text
         except httpx.ConnectError as exc:
-            logger.error(f"Cannot reach Gemini API: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Cannot reach the Gemini API. Check your internet connection.",
-            ) from exc
+            raise _connect_error(exc) from exc
         except httpx.ReadTimeout as exc:
             logger.error(f"Gemini chat stream stalled: {exc}")
             raise HTTPException(
@@ -226,28 +260,13 @@ class GeminiService:
                 detail="Gemini did not respond in time. Please try again.",
             ) from exc
         except httpx.HTTPStatusError as exc:
-            # In streaming mode the response body isn't buffered automatically --
-            # accessing exc.response.text directly here raises httpx.ResponseNotRead
-            # and masks the real error. Read it safely first.
-            body_text = await _safe_read_error_body(exc.response)
+            body_text = await safe_read_error_body(exc.response)
             logger.error(f"Gemini chat request failed ({exc.response.status_code}): {body_text}")
+            raise _http_error(exc, body_text, "chat request") from exc
+        except httpx.TransportError as exc:  # read errors, dropped connections, etc.
+            raise _connect_error(exc) from exc
 
-            if exc.response.status_code == 429:
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=_describe_rate_limit(body_text),
-                ) from exc
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Gemini chat request failed: {body_text}",
-            ) from exc
-
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((httpx.ConnectError, httpx.RemoteProtocolError)),
-    )
+    @provider_retry(attempts=3)
     async def generate_chat_response(
         self,
         system_prompt: str,
@@ -256,8 +275,8 @@ class GeminiService:
     ) -> str:
         """Generate a complete chat response by collecting the full token stream.
 
-        Use this when you need the whole answer at once. For forwarding tokens
-        to a browser as they're generated, use stream_chat_response instead.
+        Safe to retry (unlike stream_chat_response) because nothing has been
+        returned to the caller until the whole answer is collected.
         """
         content_parts: list[str] = []
         async for token in self.stream_chat_response(system_prompt, user_prompt, temperature):
@@ -271,6 +290,7 @@ class GeminiService:
             )
         return content
 
+    @provider_retry(attempts=3)
     async def describe_image(self, image_bytes: bytes, mime_type: str) -> str:
         """Generate a rich text description of an image, including any visible text (OCR-like).
 
@@ -281,7 +301,6 @@ class GeminiService:
         """
         self._require_api_key()
 
-        url = f"/models/{self.chat_model}:generateContent"
         payload = {
             "contents": [
                 {
@@ -309,29 +328,9 @@ class GeminiService:
             ],
         }
 
-        try:
-            async with self._client() as client:
-                response = await client.post(url, params={"key": self.api_key}, json=payload)
-                response.raise_for_status()
-                data = response.json()
-        except httpx.ConnectError as exc:
-            logger.error(f"Cannot reach Gemini API: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Cannot reach the Gemini API. Check your internet connection.",
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            body_text = await _safe_read_error_body(exc.response)
-            logger.error(f"Gemini image description request failed ({exc.response.status_code}): {body_text}")
-            if exc.response.status_code == 429:
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=_describe_rate_limit(body_text),
-                ) from exc
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Gemini image description request failed: {body_text}",
-            ) from exc
+        data = await self._post_json(
+            f"/models/{self.chat_model}:generateContent", payload, "image description request"
+        )
 
         try:
             text = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -354,9 +353,7 @@ class GeminiService:
             return False
         try:
             async with self._client() as client:
-                response = await client.get(
-                    f"/models/{self.embed_model}", params={"key": self.api_key}
-                )
+                response = await client.get(f"/models/{self.embed_model}")
                 return response.status_code == 200
         except httpx.HTTPError:
             return False

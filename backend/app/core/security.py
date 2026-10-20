@@ -59,23 +59,47 @@ def validate_extension(filename: str) -> str:
     return ext
 
 
+_READ_CHUNK_BYTES = 1024 * 1024
+
+
 async def validate_upload_size(file: UploadFile) -> bytes:
-    """Read the full upload into memory while enforcing the max size limit."""
+    """Read the upload in chunks, stopping as soon as it exceeds the max size limit."""
     settings = get_settings()
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    too_large = HTTPException(
+        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        detail=f"File exceeds maximum allowed size of {settings.max_upload_size_mb}MB",
+    )
 
-    contents = await file.read()
-    if len(contents) > max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds maximum allowed size of {settings.max_upload_size_mb}MB",
-        )
+    if file.size is not None and file.size > max_bytes:
+        raise too_large
+
+    buffer = bytearray()
+    while chunk := await file.read(_READ_CHUNK_BYTES):
+        buffer.extend(chunk)
+        if len(buffer) > max_bytes:
+            raise too_large
+    contents = bytes(buffer)
     if len(contents) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded file is empty",
         )
     return contents
+
+
+# A "letter": any script's letters, plus Indic vowel signs/viramas (combining marks).
+_LETTER = r"(?:[^\W\d_]|[ऀ-෿])"
+_LANGUAGE_NAME_RE = re.compile(rf"^{_LETTER}+(?:[ \-]{_LETTER}+)*(?: \({_LETTER}+\))?$")
+
+
+def is_valid_language_name(value: str) -> bool:
+    """A language name like 'Tamil' or 'Chinese (Simplified)' -- not free text.
+
+    The value is inserted into the system prompt, so anything that isn't
+    plainly a language name (sentences, punctuation, instructions) is rejected.
+    """
+    return bool(_LANGUAGE_NAME_RE.match(value.strip())) and len(value.split()) <= 3
 
 
 def generate_document_id() -> str:

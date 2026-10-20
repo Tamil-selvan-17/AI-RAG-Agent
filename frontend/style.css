@@ -23,6 +23,9 @@
 
 * { box-sizing: border-box; }
 
+/* Make the `hidden` attribute win over component display rules (e.g. .sources is flex). */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   margin: 0;
@@ -350,6 +353,24 @@ body {
   color: var(--ink);
 }
 
+.room-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-chip {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.user-chip:empty { display: none; }
+
 /* ---- Chat scroll area ---- */
 
 .chat-scroll {
@@ -427,6 +448,43 @@ body {
 .msg-answer.loading {
   color: var(--ink-faint);
   font-style: italic;
+}
+
+.msg-answer.has-sources {
+  cursor: default;
+}
+
+.answer-actions {
+  display: flex;
+  margin-top: 6px;
+}
+
+.sources-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 3px 9px 3px 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.sources-toggle:hover,
+.sources-toggle:focus-visible {
+  color: var(--clay);
+  background: var(--clay-tint);
+  outline: none;
+}
+
+.sources-toggle.active {
+  color: var(--clay);
+  border-color: var(--clay-tint);
+  background: var(--clay-tint);
 }
 
 .sources {
@@ -630,6 +688,130 @@ body {
   cursor: not-allowed;
 }
 
+/* ---- Login page ---- */
+
+.login-body {
+  min-height: 100%;
+}
+
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 30px 28px 28px;
+  box-shadow: 0 1px 2px rgba(28, 32, 36, 0.04), 0 8px 28px rgba(28, 32, 36, 0.06);
+}
+
+.login-card .brand {
+  margin-bottom: 26px;
+}
+
+.login-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.login-sub {
+  margin: 0 0 22px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.login-form label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+
+.login-form input {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--surface);
+  margin-bottom: 16px;
+}
+
+.login-form input:focus {
+  outline: none;
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px var(--teal-tint);
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 64px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.password-toggle:hover { color: var(--teal); }
+
+.login-error {
+  background: var(--danger-tint);
+  color: var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+  margin: -4px 0 16px;
+}
+
+.btn-primary {
+  background: var(--teal-dark);
+  color: #F6F3EC;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 11px 16px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.btn-primary:hover { background: var(--teal); }
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 /* ---- Scrollbars ---- */
 
 .library-list::-webkit-scrollbar,
@@ -654,6 +836,11 @@ body {
     border-right: none;
     border-bottom: 1px solid var(--border);
     max-height: 40vh;
+  }
+  .room-header {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 16px;
   }
 }
 

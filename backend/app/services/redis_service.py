@@ -173,6 +173,17 @@ class RedisService:
         key = self._cache_key(question, language)
         await self._client.set(key, json.dumps(answer_payload), ex=_CACHE_TTL_SECONDS)
 
+    async def clear_answer_cache(self) -> None:
+        """Drop every cached answer -- called whenever the document set changes,
+        so answers citing deleted (or missing newly uploaded) documents aren't served."""
+        try:
+            keys = [key async for key in self._client.scan_iter(match=f"{_CACHE_KEY_PREFIX}*", count=500)]
+            if keys:
+                await self._client.delete(*keys)
+                logger.debug(f"Cleared {len(keys)} cached answers")
+        except redis.RedisError as exc:
+            logger.warning(f"Failed to clear answer cache: {exc}")
+
     # ------------------------------------------------------------------ #
     # Health
     # ------------------------------------------------------------------ #

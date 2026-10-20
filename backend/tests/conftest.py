@@ -75,6 +75,23 @@ def mock_services(monkeypatch):
 
 
 @pytest.fixture
-def client(mock_services):
+def anon_client(mock_services):
+    """A client that has not logged in."""
     with TestClient(main_module.app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def client(mock_services):
+    """A client logged in as the configured admin user."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    with TestClient(main_module.app) as test_client:
+        response = test_client.post(
+            "/api/auth/login",
+            json={"username": settings.admin_username, "password": settings.admin_password},
+        )
+        assert response.status_code == 200, response.text
+        test_client.headers["Authorization"] = f"Bearer {response.json()['access_token']}"
         yield test_client

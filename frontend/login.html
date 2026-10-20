@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Archive — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body class="login-body">
+
+<main class="login-shell">
+  <div class="login-card">
+    <div class="brand">
+      <span class="brand-mark">A</span>
+      <div class="brand-text">
+        <h1>Archive</h1>
+        <p>Local document assistant</p>
+      </div>
+    </div>
+
+    <h2 class="login-title">Sign in</h2>
+    <p class="login-sub">Enter your admin credentials to continue.</p>
+
+    <form id="loginForm" class="login-form" novalidate>
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" required autofocus />
+
+      <label for="password">Password</label>
+      <div class="password-field">
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <button type="button" id="togglePassword" class="password-toggle" aria-label="Show password">Show</button>
+      </div>
+
+      <p id="loginError" class="login-error" role="alert" hidden></p>
+
+      <button type="submit" id="loginBtn" class="btn-primary">Sign in</button>
+    </form>
+  </div>
+</main>
+
+<script src="auth.js"></script>
+<script>
+  // Already signed in? Go straight to the app.
+  if (readSession()) window.location.replace('index.html');
+
+  const form = document.getElementById('loginForm');
+  const usernameInput = document.getElementById('username');
+  const passwordInput = document.getElementById('password');
+  const errorEl = document.getElementById('loginError');
+  const loginBtn = document.getElementById('loginBtn');
+  const togglePassword = document.getElementById('togglePassword');
+
+  togglePassword.addEventListener('click', () => {
+    const show = passwordInput.type === 'password';
+    passwordInput.type = show ? 'text' : 'password';
+    togglePassword.textContent = show ? 'Hide' : 'Show';
+    togglePassword.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+  });
+
+  function showError(message) {
+    errorEl.textContent = message;
+    errorEl.hidden = false;
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    if (!username || !password) {
+      showError('Please enter both username and password.');
+      return;
+    }
+
+    errorEl.hidden = true;
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Signing in…';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showError(typeof data.detail === 'string' ? data.detail : 'Sign in failed.');
+        passwordInput.select();
+        return;
+      }
+      saveSession(data.access_token, data.username, data.expires_at);
+      window.location.replace('index.html');
+    } catch (err) {
+      showError('Could not reach the server. Is the backend running?');
+    } finally {
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Sign in';
+    }
+  });
+</script>
+</body>
+</html>

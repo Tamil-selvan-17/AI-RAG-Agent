@@ -25,7 +25,10 @@ _STOPWORDS = {
     "he", "she", "they", "them", "it", "his", "her",
 }
 
-_WORD_RE = re.compile(r"[a-zA-Z0-9']+")
+# \w covers letters/digits in every script, but not Indic vowel signs and
+# viramas (combining marks), which would otherwise split Tamil/Hindi/etc.
+# words into fragments -- so the Indic Unicode blocks are included explicitly.
+_WORD_RE = re.compile(r"[\wऀ-෿']+")
 
 
 def _significant_words(text: str) -> set[str]:

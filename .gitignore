@@ -32,3 +32,7 @@ Thumbs.db
 
 # Node (if any tooling is added later)
 node_modules/
+
+# Environment files (secrets) -- commit backend/.env.example instead
+.env
+!.env.example

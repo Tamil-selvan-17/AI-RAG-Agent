@@ -3,9 +3,10 @@
 // Talks to the FastAPI backend for upload, document listing, and chat.
 // ==========================================================================
 
-const API_BASE = window.location.origin.includes(':5500') || window.location.protocol === 'file:'
-  ? 'http://localhost:8000'
-  : window.location.origin;
+// API_BASE, apiFetch, authHeaders, etc. come from auth.js.
+
+// Not signed in (or session expired)? Go to the login page before doing anything.
+if (!readSession()) redirectToLogin();
 
 const state = {
   conversationId: null,
@@ -29,6 +30,8 @@ const sendBtn = document.getElementById('sendBtn');
 const languageSelect = document.getElementById('languageSelect');
 const clearBtn = document.getElementById('clearBtn');
 const conversationMeta = document.getElementById('conversationMeta');
+const userChip = document.getElementById('userChip');
+const logoutBtn = document.getElementById('logoutBtn');
 
 // ==========================================================================
 // Health check
@@ -60,7 +63,7 @@ async function checkHealth() {
 
 async function loadDocuments() {
   try {
-    const res = await fetch(`${API_BASE}/api/documents`);
+    const res = await apiFetch('/api/documents');
     if (!res.ok) throw new Error('Failed to load documents');
     const data = await res.json();
     state.documents = data.documents || [];
@@ -115,7 +118,7 @@ function escapeHtml(str) {
 async function deleteDocument(documentId) {
   if (!confirm('Delete this document? This removes it from the knowledge base permanently.')) return;
   try {
-    const res = await fetch(`${API_BASE}/api/documents/${documentId}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('Delete failed');
     await loadDocuments();
   } catch (err) {
@@ -128,7 +131,7 @@ clearAllDocsBtn.addEventListener('click', async () => {
   if (state.documents.length === 0) return;
   if (!confirm(`Delete all ${state.documents.length} document(s)? This cannot be undone.`)) return;
   try {
-    const res = await fetch(`${API_BASE}/api/documents`, { method: 'DELETE' });
+    const res = await apiFetch('/api/documents', { method: 'DELETE' });
     if (!res.ok) throw new Error('Delete failed');
     await loadDocuments();
   } catch (err) {
@@ -176,6 +179,8 @@ function uploadFile(file) {
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', `${API_BASE}/api/documents/upload`);
+  const { Authorization } = authHeaders();
+  if (Authorization) xhr.setRequestHeader('Authorization', Authorization);
 
   xhr.upload.addEventListener('progress', (e) => {
     if (e.lengthComputable) {
@@ -189,6 +194,10 @@ function uploadFile(file) {
 
   xhr.onload = () => {
     uploadProgress.hidden = true;
+    if (xhr.status === 401) {
+      redirectToLogin();
+      return;
+    }
     if (xhr.status >= 200 && xhr.status < 300) {
       loadDocuments();
     } else {
@@ -234,7 +243,7 @@ composerForm.addEventListener('submit', async (e) => {
 
 async function streamAnswer(question, wrapEl) {
   const selectedLanguage = languageSelect.value || null;
-  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+  const res = await apiFetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -338,11 +347,33 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(rawHtml);
 }
 
+const SOURCES_ICON = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="8" y1="13" x2="16" y2="13"></line><line x1="8" y1="17" x2="13" y2="17"></line></svg>`;
+
+// Sources are hidden by default; the small icon button or a double-click on the
+// answer shows/hides them (with match %).
+function toggleSources(wrapEl) {
+  const sourcesEl = wrapEl.querySelector('.sources');
+  const toggleBtn = wrapEl.querySelector('.sources-toggle');
+  if (!sourcesEl || !toggleBtn) return;
+  const show = sourcesEl.hidden;
+  sourcesEl.hidden = !show;
+  toggleBtn.setAttribute('aria-expanded', String(show));
+  toggleBtn.classList.toggle('active', show);
+  if (show) sourcesEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
 function renderAnswerContent(wrapEl, answer, sources) {
   let sourcesHtml = '';
-  if (sources && sources.length > 0) {
+  const hasSources = sources && sources.length > 0;
+  if (hasSources) {
+    const count = sources.length;
     sourcesHtml = `
-      <div class="sources">
+      <div class="answer-actions">
+        <button type="button" class="sources-toggle" aria-expanded="false" title="Show sources (or double-click the answer)">
+          ${SOURCES_ICON}<span>${count} source${count === 1 ? '' : 's'}</span>
+        </button>
+      </div>
+      <div class="sources" hidden>
         <p class="sources-label">Sources</p>
         ${sources.map(s => `
           <div class="source-card">
@@ -357,9 +388,18 @@ function renderAnswerContent(wrapEl, answer, sources) {
   }
 
   wrapEl.innerHTML = `
-    <div class="msg-answer">${renderMarkdown(answer)}</div>
+    <div class="msg-answer${hasSources ? ' has-sources' : ''}">${renderMarkdown(answer)}</div>
     ${sourcesHtml}
   `;
+
+  if (hasSources) {
+    wrapEl.querySelector('.sources-toggle').addEventListener('click', () => toggleSources(wrapEl));
+    wrapEl.querySelector('.msg-answer').addEventListener('dblclick', () => {
+      // Double-click normally selects a word; drop that selection since it's a toggle here.
+      window.getSelection()?.removeAllRanges();
+      toggleSources(wrapEl);
+    });
+  }
   chatScroll.scrollTop = chatScroll.scrollHeight;
 }
 
@@ -378,6 +418,20 @@ clearBtn.addEventListener('click', () => {
 // Init
 // ==========================================================================
 
-checkHealth();
-loadDocuments();
-setInterval(checkHealth, 20000);
+const session = currentSession();
+if (session) userChip.textContent = session.username;
+
+logoutBtn.addEventListener('click', async () => {
+  try {
+    await apiFetch('/api/auth/logout', { method: 'POST' });
+  } catch (e) {
+    // Logging out locally is what matters; ignore network errors here.
+  }
+  redirectToLogin();
+});
+
+if (session) {
+  checkHealth();
+  loadDocuments();
+  setInterval(checkHealth, 20000);
+}

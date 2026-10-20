@@ -2,7 +2,9 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.security import is_valid_language_name
 
 
 class ChatRequest(BaseModel):
@@ -21,6 +23,15 @@ class ChatRequest(BaseModel):
             "the question."
         ),
     )
+
+    @field_validator("response_language")
+    @classmethod
+    def _check_language(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        if not is_valid_language_name(value):
+            raise ValueError("response_language must be a language name, e.g. 'Tamil'")
+        return value.strip()
 
 
 class SourceReferenceResponse(BaseModel):

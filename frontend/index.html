@@ -66,7 +66,11 @@
         <h2>Reading room</h2>
         <p id="conversationMeta">New conversation</p>
       </div>
-      <button class="btn-ghost" id="clearBtn">Clear conversation</button>
+      <div class="room-header-actions">
+        <button class="btn-ghost" id="clearBtn">Clear conversation</button>
+        <span class="user-chip" id="userChip" title="Signed in"></span>
+        <button class="btn-ghost" id="logoutBtn">Log out</button>
+      </div>
     </header>
 
     <div class="chat-scroll" id="chatScroll">
@@ -108,6 +112,7 @@
 
 </div>
 
+<script src="auth.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

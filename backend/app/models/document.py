@@ -32,6 +32,9 @@ class Document(BaseModel):
     filename: str
     file_extension: str
     file_size_bytes: int
+    # Name of the file on disk (unique per document). None for documents saved
+    # before this field existed, which were stored under their plain filename.
+    stored_filename: str | None = None
     status: DocumentStatus = DocumentStatus.PROCESSING
     chunk_count: int = 0
     error_message: str | None = None

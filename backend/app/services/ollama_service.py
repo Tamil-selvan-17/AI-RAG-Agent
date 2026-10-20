@@ -13,27 +13,17 @@ import json
 
 import httpx
 from fastapi import HTTPException, status
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
 from app.core.logging import logger
+from app.services.provider_errors import (
+    TransientProviderError,
+    provider_retry,
+    safe_read_error_body,
+)
 
-_RETRYABLE_EXCEPTIONS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
-
-
-async def _safe_read_error_body(response: httpx.Response) -> str:
-    """Read an error response's body, even if it came from a streaming request.
-
-    A response obtained via `client.stream(...)` doesn't have its body buffered
-    automatically -- calling `.text` directly on it raises httpx.ResponseNotRead
-    if the body hasn't been read yet. This reads it safely first, falling back
-    to just the status code if reading fails too.
-    """
-    try:
-        await response.aread()
-        return response.text
-    except Exception:  # noqa: BLE001
-        return f"HTTP {response.status_code}"
+# Texts sent per /api/embed call (it accepts a list of inputs natively).
+_EMBED_BATCH_SIZE = 32
 
 
 class OllamaService:
@@ -53,51 +43,51 @@ class OllamaService:
         timeout = httpx.Timeout(connect=10.0, read=self.timeout, write=30.0, pool=10.0)
         return httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
-    )
-    async def generate_embedding(self, text: str) -> list[float]:
-        """Generate an embedding vector for a single piece of text using bge-m3."""
-        if not text or not text.strip():
-            raise ValueError("Cannot generate an embedding for empty text")
+    def _unavailable(self, exc: httpx.TransportError) -> TransientProviderError:
+        logger.error(f"Cannot connect to Ollama at {self.base_url}: {exc}")
+        return TransientProviderError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"Ollama service unavailable at {self.base_url}. Is Ollama running?",
+        )
 
-        payload = {"model": self.embed_model, "input": text}
-
+    @provider_retry(attempts=3)
+    async def _embed(self, inputs: list[str]) -> list[list[float]]:
+        payload = {"model": self.embed_model, "input": inputs}
         try:
             async with self._client() as client:
                 response = await client.post("/api/embed", json=payload)
                 response.raise_for_status()
                 data = response.json()
         except httpx.ConnectError as exc:
-            logger.error(f"Cannot connect to Ollama at {self.base_url}: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Ollama service unavailable at {self.base_url}. Is Ollama running?",
-            ) from exc
+            raise self._unavailable(exc) from exc
         except httpx.HTTPStatusError as exc:
             logger.error(f"Ollama embedding request failed: {exc.response.text}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Ollama embedding request failed: {exc.response.text}",
-            ) from exc
+            detail = f"Ollama embedding request failed: {exc.response.text}"
+            if exc.response.status_code >= 500:  # e.g. model still loading -- worth retrying
+                raise TransientProviderError(status.HTTP_502_BAD_GATEWAY, detail) from exc
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+        except httpx.TransportError as exc:  # read errors, dropped connections, etc.
+            raise self._unavailable(exc) from exc
 
-        embeddings = data.get("embeddings")
-        if not embeddings or not embeddings[0]:
+        embeddings = data.get("embeddings") or []
+        if len(embeddings) != len(inputs) or not all(embeddings):
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Ollama returned an empty embedding response",
+                detail="Ollama returned an empty or incomplete embedding response",
             )
-        return embeddings[0]
+        return embeddings
+
+    async def generate_embedding(self, text: str) -> list[float]:
+        """Generate an embedding vector for a single piece of text using bge-m3."""
+        if not text or not text.strip():
+            raise ValueError("Cannot generate an embedding for empty text")
+        return (await self._embed([text]))[0]
 
     async def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts sequentially (Ollama has no native batch embed)."""
+        """Generate embeddings for many texts, several per request (order preserved)."""
         vectors: list[list[float]] = []
-        for text in texts:
-            vector = await self.generate_embedding(text)
-            vectors.append(vector)
+        for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+            vectors.extend(await self._embed(texts[i : i + _EMBED_BATCH_SIZE]))
         return vectors
 
     async def stream_chat_response(
@@ -115,9 +105,9 @@ class OllamaService:
         (Render, nginx, etc.) that give up on a request producing no output for
         too long -- a real streamed response never looks "silent" to them.
 
-        Note: not wrapped in @retry -- tenacity can't safely retry a generator that
-        has already yielded partial output to a caller. Connection failures before
-        any token is yielded still raise a clear HTTPException below.
+        Note: not retried -- a generator that has already yielded partial output
+        to a caller can't be safely restarted. Connection failures before any
+        token is yielded still raise a clear HTTPException below.
         """
         payload = {
             "model": self.chat_model,
@@ -148,11 +138,7 @@ class OllamaService:
                         if chunk.get("done"):
                             break
         except httpx.ConnectError as exc:
-            logger.error(f"Cannot connect to Ollama at {self.base_url}: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Ollama service unavailable at {self.base_url}. Is Ollama running?",
-            ) from exc
+            raise self._unavailable(exc) from exc
         except httpx.ReadTimeout as exc:
             logger.error(f"Ollama chat stream stalled (no token within {self.timeout}s): {exc}")
             raise HTTPException(
@@ -164,22 +150,16 @@ class OllamaService:
                 ),
             ) from exc
         except httpx.HTTPStatusError as exc:
-            # Same fix as GeminiService: a streaming response's body isn't buffered
-            # automatically, so exc.response.text would raise httpx.ResponseNotRead
-            # and mask the real error. Read it safely first.
-            body_text = await _safe_read_error_body(exc.response)
+            body_text = await safe_read_error_body(exc.response)
             logger.error(f"Ollama chat request failed ({exc.response.status_code}): {body_text}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Ollama chat request failed: {body_text}",
             ) from exc
+        except httpx.TransportError as exc:  # read errors, dropped connections, etc.
+            raise self._unavailable(exc) from exc
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((httpx.ConnectError, httpx.RemoteProtocolError)),
-    )
+    @provider_retry(attempts=2)
     async def generate_chat_response(
         self,
         system_prompt: str,
@@ -236,13 +216,9 @@ class OllamaService:
                 response.raise_for_status()
                 data = response.json()
         except httpx.ConnectError as exc:
-            logger.error(f"Cannot connect to Ollama at {self.base_url}: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Ollama service unavailable at {self.base_url}. Is Ollama running?",
-            ) from exc
+            raise self._unavailable(exc) from exc
         except httpx.HTTPStatusError as exc:
-            body_text = await _safe_read_error_body(exc.response)
+            body_text = await safe_read_error_body(exc.response)
             logger.error(f"Ollama image description request failed ({exc.response.status_code}): {body_text}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -251,6 +227,8 @@ class OllamaService:
                     f"vision-capable model? (e.g. `ollama pull llava`). Details: {body_text}"
                 ),
             ) from exc
+        except httpx.TransportError as exc:  # read errors, dropped connections, etc.
+            raise self._unavailable(exc) from exc
 
         content = data.get("message", {}).get("content", "").strip()
         if not content:

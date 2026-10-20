@@ -127,7 +127,23 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The `.env` file in `backend/` already points at `localhost` for Ollama, Qdrant, and Redis — matching your local setup. Adjust it if any service runs elsewhere.
+Configuration lives in `backend/.env`, which is **not committed** (it holds secrets). On a fresh clone, copy the template first:
+
+```bash
+cp .env.example .env
+```
+
+It points at `localhost` for Ollama, Qdrant, and Redis — matching your local setup. Adjust it if any service runs elsewhere.
+
+### Login
+
+The app has a single admin login (no user database). Defaults: username `admin`, password `P@ss@123`.
+Change them with `ADMIN_USERNAME` / `ADMIN_PASSWORD` in `.env` — **always change the password before deploying anywhere public** —
+and set `AUTH_SECRET_KEY` to a long random string so sessions survive restarts:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
 
 Once running:
 - API: `http://localhost:8000`
@@ -180,6 +196,10 @@ Tests cover the upload API, chat API, chunking service, and embedding service, u
 ## 10. API documentation
 
 Base URL: `http://localhost:8000`
+
+All `/api/documents` and `/api/chat` endpoints require login: call `POST /api/auth/login` with
+`{"username": "...", "password": "..."}`, then send the returned `access_token` as
+`Authorization: Bearer <token>`. `/health` stays public. Five failed logins from one IP lock login for 5 minutes.
 
 ### `POST /api/documents/upload`
 Upload a document (`multipart/form-data`, field name `file`). Accepts `.pdf`, `.docx`, `.txt`, `.csv`, up to 50MB.
@@ -294,7 +314,7 @@ AI-RAG-Agent/
 │   │   └── utils/                   file_utils
 │   ├── tests/                       pytest suite (mocked external services)
 │   ├── requirements.txt
-│   ├── .env
+│   ├── .env.example        # copy to .env (not committed)
 │   ├── pytest.ini
 │   └── Dockerfile
 ├── frontend/

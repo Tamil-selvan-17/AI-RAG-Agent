@@ -5,10 +5,13 @@ Orchestrates the full pipeline end to end:
 
 Ingestion:  file -> extract text -> clean -> chunk -> embed -> store in Qdrant
 Retrieval:  query -> embed -> Qdrant similarity search -> top-k chunks
-Generation: system prompt + retrieved context + question -> Ollama LLM answer
+Retrieval:  follow-up questions are first rewritten into standalone questions
+Generation: system prompt + retrieved context + question -> LLM answer
 Memory:     persist each turn to Redis; use recent turns as extra context
 """
 
+import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -105,6 +108,37 @@ def _build_system_prompt(language_name: str | None = None) -> str:
     )
 
 
+_NO_MATCH_ANSWER = (
+    "I couldn't find any relevant information in the uploaded documents "
+    "to answer that question. Please try rephrasing, or upload a document "
+    "that covers this topic."
+)
+
+_REWRITE_SYSTEM_PROMPT = (
+    "You rewrite follow-up questions into standalone search queries. Given a "
+    "conversation and a follow-up question, output ONE standalone question that "
+    "includes every name, subject, or detail from the conversation the follow-up "
+    "refers to (resolve words like 'he', 'it', 'there', 'that company'). Keep the "
+    "same language as the follow-up question. If the follow-up is already "
+    "standalone, return it unchanged. Output only the question, nothing else."
+)
+
+
+@dataclass
+class _PreparedAnswer:
+    """Everything needed to produce (or directly return) an answer for one question."""
+
+    conversation_id: str
+    language_name: str | None
+    has_history: bool
+    sources: list[SourceReference] = field(default_factory=list)
+    # Set when no LLM generation is needed (small talk, cache hit, no matching chunks).
+    ready_answer: str | None = None
+    from_cache: bool = False
+    system_prompt: str = ""
+    user_prompt: str = ""
+
+
 class RagService:
     """Composes document processing, retrieval, and generation services."""
 
@@ -126,10 +160,12 @@ class RagService:
         self.redis_service = redis_service or _default_memory_backend()
         self.llm_service = llm_service or _default_llm_backend()
 
-
     # ------------------------------------------------------------------ #
     # Ingestion pipeline
     # ------------------------------------------------------------------ #
+
+    def _file_path(self, document: Document) -> Path:
+        return self.settings.upload_dir_path / (document.stored_filename or document.filename)
 
     async def ingest_document(self, original_filename: str, contents: bytes) -> Document:
         """Full ingestion pipeline: validate -> save -> extract -> chunk -> embed -> store."""
@@ -147,7 +183,18 @@ class RagService:
         await self.redis_service.save_document(document)
 
         try:
-            file_path = save_file_to_disk(self.settings.upload_dir_path, safe_name, contents)
+            # Stored under a per-document name so two uploads called "resume.pdf"
+            # never overwrite each other, and deleting one never removes the other's file.
+            # File I/O and parsing run in a worker thread so a large PDF doesn't
+            # freeze the event loop (and every other user's request) while it's parsed.
+            file_path = await asyncio.to_thread(
+                save_file_to_disk,
+                self.settings.upload_dir_path,
+                f"{document_id}_{safe_name}",
+                contents,
+            )
+            document.stored_filename = file_path.name
+            await self.redis_service.save_document(document)
 
             if is_image_extension(extension):
                 # Images have no local text to extract -- describe/OCR them via the
@@ -165,7 +212,9 @@ class RagService:
                         detail="No description could be generated for this image",
                     )
             else:
-                text = self.document_service.extract_text(file_path, extension)
+                text = await asyncio.to_thread(
+                    self.document_service.extract_text, file_path, extension
+                )
 
             chunks = self.chunking_service.chunk_document(
                 text=text,
@@ -188,6 +237,8 @@ class RagService:
             document.status = DocumentStatus.READY
             document.chunk_count = len(chunks)
             await self.redis_service.save_document(document)
+            # Cached "not found" / partial answers may now be wrong.
+            await self.redis_service.clear_answer_cache()
 
             logger.info(f"Ingested document '{safe_name}' ({document_id}) with {len(chunks)} chunks")
             return document
@@ -270,8 +321,9 @@ class RagService:
             )
 
         await self.redis_service.delete_document(document_id)
+        await self.redis_service.clear_answer_cache()
 
-        file_path = self.settings.upload_dir_path / document.filename
+        file_path = self._file_path(document)
         if file_path.exists():
             file_path.unlink()
             logger.info(f"Deleted file from disk: {file_path}")
@@ -297,9 +349,10 @@ class RagService:
 
         for document in documents:
             await self.redis_service.delete_document(document.document_id)
-            file_path = self.settings.upload_dir_path / document.filename
+            file_path = self._file_path(document)
             if file_path.exists():
                 file_path.unlink()
+        await self.redis_service.clear_answer_cache()
 
         logger.info(f"Deleted all {len(documents)} documents")
         return len(documents)
@@ -307,6 +360,123 @@ class RagService:
     # ------------------------------------------------------------------ #
     # Retrieval + generation pipeline
     # ------------------------------------------------------------------ #
+
+    async def _standalone_question(self, question: str, history: str) -> str:
+        """Rewrite a follow-up question using the conversation so retrieval finds the right chunks.
+
+        "How many years did he work there?" embeds poorly on its own -- it names
+        neither the person nor the company. Falls back to the original question
+        if the rewrite fails or looks wrong, so this can only improve retrieval.
+        """
+        try:
+            rewritten = await self.llm_service.generate_chat_response(
+                system_prompt=_REWRITE_SYSTEM_PROMPT,
+                user_prompt=f"Conversation:\n{history}\n\nFollow-up question: {question}\n\nStandalone question:",
+            )
+        except HTTPException as exc:
+            logger.warning(f"Follow-up question rewrite failed, using original question: {exc.detail}")
+            return question
+
+        lines = [line.strip().strip('"') for line in rewritten.strip().splitlines() if line.strip()]
+        if not lines or len(lines[0]) > 500:
+            return question
+        logger.debug(f"Rewrote follow-up question {question!r} -> {lines[0]!r}")
+        return lines[0]
+
+    async def _prepare_answer(
+        self,
+        question: str,
+        conversation_id: str | None,
+        top_k: int | None,
+        response_language: str | None,
+    ) -> _PreparedAnswer:
+        """Shared retrieval path for answer_question and stream_answer."""
+        conversation_id = conversation_id or self.redis_service.new_conversation_id()
+        k = top_k or self.settings.rag_top_k
+        language_name = response_language or detect_language_name(question)
+
+        smalltalk_reply = detect_smalltalk_reply(question)
+        if smalltalk_reply:
+            return _PreparedAnswer(
+                conversation_id, language_name, has_history=False, ready_answer=smalltalk_reply
+            )
+
+        history = await self.redis_service.get_recent_context(conversation_id, max_turns=3)
+
+        # Only standalone questions are cached: a follow-up like "what about his
+        # education?" means something different in every conversation.
+        if not history:
+            cached = await self.redis_service.get_cached_answer(question, language_name)
+            if cached:
+                return _PreparedAnswer(
+                    conversation_id,
+                    language_name,
+                    has_history=False,
+                    sources=[SourceReference(**s) for s in cached["sources"]],
+                    ready_answer=cached["answer"],
+                    from_cache=True,
+                )
+
+        search_query = question
+        if history and self.settings.rag_query_rewrite:
+            search_query = await self._standalone_question(question, history)
+
+        query_vector = await self.embedding_service.embed_text(search_query)
+        await self.qdrant_service.ensure_collection()
+        # Fetch a wider candidate pool than we'll actually use, then rerank down
+        # to top_k. Vector similarity alone can miss chunks that literally
+        # contain the question's specific terms (names, numbers) in favor of
+        # ones that are merely topically similar -- reranking with a lexical
+        # signal corrects for that.
+        candidates = await self.qdrant_service.search(
+            query_vector=query_vector,
+            top_k=min(k * 4, 40),
+            score_threshold=self.settings.rag_score_threshold,
+        )
+        results = rerank(search_query, candidates, top_k=k)
+
+        sources = self._deduplicate_sources(
+            [
+                SourceReference(
+                    document_id=r["document_id"],
+                    filename=r["filename"],
+                    chunk_id=r["chunk_id"],
+                    chunk_text=r["chunk_text"],
+                    score=r["score"],
+                )
+                for r in results
+            ]
+        )
+
+        prepared = _PreparedAnswer(
+            conversation_id, language_name, has_history=bool(history), sources=sources
+        )
+        if not sources:
+            prepared.ready_answer = _NO_MATCH_ANSWER
+            return prepared
+
+        prepared.system_prompt = _build_system_prompt(language_name)
+        prepared.user_prompt = self._build_user_prompt(
+            question, self._build_context(sources), history
+        )
+        return prepared
+
+    async def _record_answer(self, prepared: _PreparedAnswer, question: str, answer: str) -> None:
+        """Persist the turn to conversation memory and cache it when appropriate."""
+        await self.redis_service.append_chat_turn(
+            ChatTurn(
+                conversation_id=prepared.conversation_id,
+                question=question,
+                answer=answer,
+                sources=prepared.sources,
+            )
+        )
+        if prepared.sources and not prepared.from_cache and not prepared.has_history:
+            await self.redis_service.cache_answer(
+                question,
+                {"answer": answer, "sources": [s.model_dump() for s in prepared.sources]},
+                prepared.language_name,
+            )
 
     async def answer_question(
         self,
@@ -316,94 +486,17 @@ class RagService:
         response_language: str | None = None,
     ) -> tuple[str, str, list[SourceReference]]:
         """Run retrieval + generation for a question, persist memory, return results."""
-        conversation_id = conversation_id or self.redis_service.new_conversation_id()
-        k = top_k or self.settings.rag_top_k
-        language_name = response_language or detect_language_name(question)
+        prepared = await self._prepare_answer(question, conversation_id, top_k, response_language)
 
-        smalltalk_reply = detect_smalltalk_reply(question)
-        if smalltalk_reply:
-            turn = ChatTurn(
-                conversation_id=conversation_id,
-                question=question,
-                answer=smalltalk_reply,
-                sources=[],
-            )
-            await self.redis_service.append_chat_turn(turn)
-            return conversation_id, smalltalk_reply, []
-
-        cached = await self.redis_service.get_cached_answer(question, language_name)
-        if cached:
-            sources = [SourceReference(**s) for s in cached["sources"]]
-            turn = ChatTurn(
-                conversation_id=conversation_id,
-                question=question,
-                answer=cached["answer"],
-                sources=sources,
-            )
-            await self.redis_service.append_chat_turn(turn)
-            return conversation_id, cached["answer"], sources
-
-        query_vector = await self.embedding_service.embed_text(question)
-
-        await self.qdrant_service.ensure_collection()
-        # Fetch a wider candidate pool than we'll actually use, then rerank down
-        # to top_k. Vector similarity alone can miss chunks that literally
-        # contain the question's specific terms (names, numbers) in favor of
-        # ones that are merely topically similar -- reranking with a lexical
-        # signal corrects for that.
-        candidate_pool_size = min(k * 4, 40)
-        candidates = await self.qdrant_service.search(
-            query_vector=query_vector,
-            top_k=candidate_pool_size,
-            score_threshold=self.settings.rag_score_threshold,
-        )
-        results = rerank(question, candidates, top_k=k)
-
-        sources = [
-            SourceReference(
-                document_id=r["document_id"],
-                filename=r["filename"],
-                chunk_id=r["chunk_id"],
-                chunk_text=r["chunk_text"],
-                score=r["score"],
-            )
-            for r in results
-        ]
-        sources = self._deduplicate_sources(sources)
-
-        context = self._build_context(sources)
-        recent_history = await self.redis_service.get_recent_context(conversation_id, max_turns=3)
-
-        user_prompt = self._build_user_prompt(question, context, recent_history)
-
-        if not sources:
-            answer = (
-                "I couldn't find any relevant information in the uploaded documents "
-                "to answer that question. Please try rephrasing, or upload a document "
-                "that covers this topic."
-            )
-        else:
+        answer = prepared.ready_answer
+        if answer is None:
             answer = await self.llm_service.generate_chat_response(
-                system_prompt=_build_system_prompt(language_name),
-                user_prompt=user_prompt,
+                system_prompt=prepared.system_prompt,
+                user_prompt=prepared.user_prompt,
             )
 
-        turn = ChatTurn(
-            conversation_id=conversation_id,
-            question=question,
-            answer=answer,
-            sources=sources,
-        )
-        await self.redis_service.append_chat_turn(turn)
-
-        if sources:
-            await self.redis_service.cache_answer(
-                question,
-                {"answer": answer, "sources": [s.model_dump() for s in sources]},
-                language_name,
-            )
-
-        return conversation_id, answer, sources
+        await self._record_answer(prepared, question, answer)
+        return prepared.conversation_id, answer, prepared.sources
 
     async def stream_answer(
         self,
@@ -423,84 +516,21 @@ class RagService:
         into actual HTTP chunks (e.g. as Server-Sent Events) so bytes reach the browser
         as soon as each token is ready, rather than all at once at the very end.
         """
-        conversation_id = conversation_id or self.redis_service.new_conversation_id()
-        k = top_k or self.settings.rag_top_k
-        language_name = response_language or detect_language_name(question)
-
-        smalltalk_reply = detect_smalltalk_reply(question)
-        if smalltalk_reply:
-            yield {"type": "token", "content": smalltalk_reply}
-            turn = ChatTurn(
-                conversation_id=conversation_id,
-                question=question,
-                answer=smalltalk_reply,
-                sources=[],
-            )
-            await self.redis_service.append_chat_turn(turn)
-            yield {"type": "done", "conversation_id": conversation_id, "sources": []}
-            return
-
-        cached = await self.redis_service.get_cached_answer(question, language_name)
-        if cached:
-            sources = [SourceReference(**s) for s in cached["sources"]]
-            yield {"type": "token", "content": cached["answer"]}
-            turn = ChatTurn(
-                conversation_id=conversation_id,
-                question=question,
-                answer=cached["answer"],
-                sources=sources,
-            )
-            await self.redis_service.append_chat_turn(turn)
-            yield {
-                "type": "done",
-                "conversation_id": conversation_id,
-                "sources": [s.model_dump() for s in sources],
-            }
-            return
-
         try:
-            query_vector = await self.embedding_service.embed_text(question)
-            await self.qdrant_service.ensure_collection()
-            candidate_pool_size = min(k * 4, 40)
-            candidates = await self.qdrant_service.search(
-                query_vector=query_vector,
-                top_k=candidate_pool_size,
-                score_threshold=self.settings.rag_score_threshold,
-            )
-            results = rerank(question, candidates, top_k=k)
+            prepared = await self._prepare_answer(question, conversation_id, top_k, response_language)
         except HTTPException as exc:
             yield {"type": "error", "detail": exc.detail}
             return
 
-        sources = [
-            SourceReference(
-                document_id=r["document_id"],
-                filename=r["filename"],
-                chunk_id=r["chunk_id"],
-                chunk_text=r["chunk_text"],
-                score=r["score"],
-            )
-            for r in results
-        ]
-        sources = self._deduplicate_sources(sources)
-
-        if not sources:
-            answer = (
-                "I couldn't find any relevant information in the uploaded documents "
-                "to answer that question. Please try rephrasing, or upload a document "
-                "that covers this topic."
-            )
+        if prepared.ready_answer is not None:
+            answer = prepared.ready_answer
             yield {"type": "token", "content": answer}
         else:
-            context = self._build_context(sources)
-            recent_history = await self.redis_service.get_recent_context(conversation_id, max_turns=3)
-            user_prompt = self._build_user_prompt(question, context, recent_history)
-
             answer_parts: list[str] = []
             try:
                 async for token in self.llm_service.stream_chat_response(
-                    system_prompt=_build_system_prompt(language_name),
-                    user_prompt=user_prompt,
+                    system_prompt=prepared.system_prompt,
+                    user_prompt=prepared.user_prompt,
                 ):
                     answer_parts.append(token)
                     yield {"type": "token", "content": token}
@@ -513,25 +543,16 @@ class RagService:
                 yield {"type": "error", "detail": "The AI provider returned an empty response."}
                 return
 
-        turn = ChatTurn(
-            conversation_id=conversation_id,
-            question=question,
-            answer=answer,
-            sources=sources,
-        )
-        await self.redis_service.append_chat_turn(turn)
-
-        if sources:
-            await self.redis_service.cache_answer(
-                question,
-                {"answer": answer, "sources": [s.model_dump() for s in sources]},
-                language_name,
-            )
+        try:
+            await self._record_answer(prepared, question, answer)
+        except HTTPException as exc:
+            # The answer was already delivered; failing to save memory shouldn't hide it.
+            logger.warning(f"Answer delivered but not saved to conversation memory: {exc.detail}")
 
         yield {
             "type": "done",
-            "conversation_id": conversation_id,
-            "sources": [s.model_dump() for s in sources],
+            "conversation_id": prepared.conversation_id,
+            "sources": [s.model_dump() for s in prepared.sources],
         }
 
     async def get_history(self, conversation_id: str) -> list[ChatTurn]:

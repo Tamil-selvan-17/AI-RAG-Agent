@@ -11,7 +11,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY .env .env
+# Configuration (incl. ADMIN_PASSWORD / AUTH_SECRET_KEY / API keys) comes from the
+# environment at runtime (docker-compose env_file, or your host's env settings) --
+# never baked into the image.
 
 RUN mkdir -p /app/logs /app/documents
 

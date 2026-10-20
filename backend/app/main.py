@@ -8,12 +8,13 @@ startup/shutdown lifecycle hooks (e.g. ensuring the Qdrant collection exists).
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import chat_routes, health_routes, upload_routes
+from app.api import auth_routes, chat_routes, health_routes, upload_routes
+from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.logging import logger
 from app.services.qdrant_service import QdrantService
@@ -42,7 +43,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
-    allow_credentials=True,
+    # Auth uses a Bearer header, not cookies, so credentials mode isn't needed
+    # (and must not be combined with a wildcard origin).
+    allow_credentials=settings.cors_origin_list != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -51,7 +54,9 @@ app.add_middleware(
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     logger.warning(f"HTTPException on {request.method} {request.url.path}: {exc.detail}")
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers
+    )
 
 
 @app.exception_handler(Exception)
@@ -64,8 +69,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 app.include_router(health_routes.router)
-app.include_router(upload_routes.router)
-app.include_router(chat_routes.router)
+app.include_router(auth_routes.router)
+app.include_router(upload_routes.router, dependencies=[Depends(require_auth)])
+app.include_router(chat_routes.router, dependencies=[Depends(require_auth)])
 
 # Serve the plain HTML/CSS/JS frontend directly from the backend for convenience.
 # Try common locations so this works both for local `uvicorn` runs (cwd=backend/)

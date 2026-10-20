@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_score_threshold: float = 0.3
 
+    # Rewrite follow-up questions ("what about his education?") into standalone
+    # questions using the conversation history before searching Qdrant. Costs one
+    # extra (short) LLM call per follow-up question; first questions are unaffected.
+    rag_query_rewrite: bool = True
+
+    # ---- Auth (single admin user, no database) ----
+    admin_username: str = "admin"
+    admin_password: str = "P@ss@123"
+    # Secret used to sign login session tokens. If left empty, a random one is
+    # generated at startup -- which works, but logs everyone out on every restart.
+    auth_secret_key: str = ""
+    auth_session_hours: int = 12
+
     # ---- App ----
     app_name: str = "AI RAG Agent"
     app_env: str = "development"
