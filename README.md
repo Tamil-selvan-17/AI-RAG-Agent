@@ -1,397 +1,334 @@
-# Archive — Local Advanced RAG AI Agent
+# Archive — RAG Document Assistant
 
-A production-style document assistant that runs **entirely on your local machine**. Upload PDFs, Word documents, text files, or CSVs; the system extracts, chunks, and embeds them with a local Ollama model, stores the vectors in Qdrant, and answers your questions using a local LLM — with every answer grounded in cited source passages. Conversation memory and a frequently-asked-question cache live in Redis.
+Upload PDFs, Word documents, text files, CSVs or images, then ask questions about them. Every answer is
+grounded in your documents, with the exact source passages (file, page, section, match %) one click away.
 
-No data ever leaves your machine. No OpenAI or other external AI API is used.
+It runs in two ways:
+
+| | **Local** | **Cloud (free tier)** |
+|---|---|---|
+| AI (chat + embeddings) | Ollama on your machine (`qwen2.5:7b`, `bge-m3`) — no data leaves your PC | Google Gemini API (`gemini-flash-lite-latest`, `gemini-embedding-001`) |
+| Vector database | Qdrant in Docker | Qdrant Cloud |
+| Memory / cache | Redis in Docker, or in-process RAM | In-process RAM (or Upstash Redis) |
+| Hosting | `uvicorn` / Docker Compose | Render (auto-deploys from `main`) — see [FREE_CLOUD_DEPLOYMENT.md](FREE_CLOUD_DEPLOYMENT.md) |
+
+The provider is chosen with `AI_PROVIDER` and `MEMORY_BACKEND` in `backend/.env`; nothing else changes.
 
 ---
 
-## 1. Architecture overview
+## 1. Features
+
+- **Login** — single admin account (no user database), signed expiring sessions, brute-force lockout.
+- **Documents** — PDF, DOCX, TXT, CSV and images (JPG/PNG/WEBP/GIF/BMP, described/OCR'd by the vision model).
+  Scanned PDFs without a text layer are read page by page with the vision model. Multi-file upload;
+  indexing runs in the background; duplicate files are rejected.
+- **Answers** — streamed token by token, rendered as markdown, in the language you pick (or the question's).
+  Follow-up questions ("when did he join *there*?") are rewritten into standalone searches.
+- **Sources** — hidden by default; click the small *sources* icon (or double-click the answer) to see each
+  passage with file, page, section and match %.
+- **Agent mode** — hard questions ("compare…", "all of his projects…") go to a tool-using agent that can search
+  several times and do exact date maths (see [Agent mode](#agent-mode)).
+- **Comfort** — Stop button, conversation restored after a refresh, toast notifications, mobile layout.
+
+---
+
+## 2. How it works
 
 ```
-                     ┌────────────────────┐
-                     │   Frontend (HTML)  │
-                     │  index.html/app.js │
-                     └─────────┬──────────┘
-                               │ REST (fetch/XHR)
-                               ▼
-                     ┌────────────────────┐
-                     │   FastAPI backend   │
-                     │     app/main.py     │
-                     └─────────┬──────────┘
-           ┌───────────────────┼───────────────────┐
-           ▼                   ▼                   ▼
-   upload_routes.py      chat_routes.py      health_routes.py
-           │                   │
-           ▼                   ▼
-   ┌───────────────┐   ┌───────────────┐
-   │  rag_service   │◄──┤  rag_service   │   (shared orchestrator)
-   └───────┬───────┘   └───────┬───────┘
-           │                   │
-   ┌───────┴────────┬──────────┴─────────┬──────────────┐
-   ▼                ▼                    ▼              ▼
-document_service  chunking_service  embedding_service  ollama_service
-(PyMuPDF/docx/csv) (recursive split)  (bge-m3 via Ollama) (qwen2.5:7b)
-   │                                       │
-   ▼                                       ▼
-qdrant_service ◄───────────────── vectors stored/retrieved
+Browser (frontend/: login.html, index.html, app.js)
+   │  REST + Server-Sent Events, Bearer token
+   ▼
+FastAPI backend (backend/app/main.py)
+   ├─ /api/auth       login / me / logout
+   ├─ /api/documents  upload (background indexing), list, delete
+   ├─ /api/chat       ask (JSON or streamed), history
+   └─ /health         full check  ·  /health/live  instant liveness
    │
    ▼
-redis_service (conversation memory, document registry, answer cache)
+RagService ── DocumentService (PDF/DOCX/TXT/CSV text, scanned-PDF pages)
+           ├─ ChunkingService (600-token chunks, pages + section headings)
+           ├─ EmbeddingService ─┐
+           ├─ LLM (Gemini | Ollama) ◄┘
+           ├─ QdrantService (vectors)        ├─ AgentService (tools, fallback mode)
+           └─ Memory (Redis | RAM: history, document list, answer cache)
 ```
 
-**Ingestion pipeline:** upload → validate → extract text → clean → recursively chunk (1000 tokens, 200 overlap) → embed each chunk with `bge-m3` → store in Qdrant with full metadata.
+**Ingestion:** upload → validate (type, size, duplicate) → save → extract text (or vision OCR) → chunk
+(600 tokens, 100 overlap, page + section tracked) → embed → store in Qdrant.
 
-**Query pipeline:** question → embed with `bge-m3` → Qdrant cosine similarity search (top‑k=5) → build context from retrieved chunks + recent conversation history → generate answer with `qwen2.5:7b` (system prompt restricts it to answering only from the provided context) → persist the turn to Redis → return the answer with source references.
+**Question:** small-talk check → answer cache → (follow-up? rewrite it) → embed → Qdrant search (top 20
+candidates above the score threshold) → rerank with keyword overlap → top 5 → LLM answer from those passages
+only → save the turn. In `AGENT_MODE=fallback`, multi-part questions and weak searches go to the agent instead.
 
-**Design choices worth knowing:**
-- Chunking is a self-contained recursive character splitter (paragraph → sentence → word → character fallback) rather than a LangChain/LlamaIndex dependency, so the chunking behavior is fully transparent and has zero extra dependency-version risk.
-- Redis doubles as the lightweight document registry (status, chunk counts) since the project intentionally has no separate relational database.
-- Every service is written as an injectable class (constructor accepts its dependencies), so each one is independently unit-testable with mocks — see `backend/tests/`.
-
----
-
-## 2. Prerequisites
-
-Install on Windows (per your environment):
-
-- **Docker Desktop** (with WSL2 backend enabled)
-- **Python 3.12+**
-- **Git**
-- **Ollama** — [ollama.com](https://ollama.com)
+Retrieval settings were chosen with the evaluation scripts in `backend/eval/` (see [section 8](#8-measuring-quality)),
+not by guesswork.
 
 ---
 
-## 3. Ollama setup
+## 3. Quick start (Windows, Command Prompt)
 
-Pull the two models this project uses:
+Prerequisites: **Python 3.11+**, **Git**, and either **Ollama** (local mode) or a free
+**Gemini API key** + **Qdrant Cloud** cluster (cloud mode). Docker Desktop is optional.
+
+```bat
+cd /d "<path>\AI-RAG-Agent\backend"
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements-dev.txt
+copy .env.example .env
+```
+
+Edit `backend/.env` (see [section 4](#4-configuration)), then:
+
+```bat
+uvicorn app.main:app --reload --port 8000
+```
+
+Open **http://localhost:8000/app/** and sign in (default `admin` / `P@ss@123` — change it in `.env`).
+
+> PowerShell users: activate with `.\venv\Scripts\Activate.ps1` (run
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once if scripts are blocked).
+> macOS/Linux: `source venv/bin/activate` and `cp .env.example .env`.
+
+Other URLs: API `http://localhost:8000`, Swagger docs `http://localhost:8000/docs`.
+
+### Local services (local mode only)
 
 ```bash
 ollama pull bge-m3
 ollama pull qwen2.5:7b
-```
-
-Confirm Ollama is serving the REST API:
-
-```bash
-curl http://localhost:11434/api/version
-```
-
-Ollama must remain running (`ollama serve`, or the Windows tray app) whenever you use the assistant.
-
----
-
-## 4. Qdrant setup
-
-Run Qdrant via Docker (this is the "external service already running" referenced by `docker-compose.yml`):
-
-```bash
 docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v qdrant_storage:/qdrant/storage qdrant/qdrant
+docker run -d --name redis -p 6379:6379 redis:7-alpine     # optional: or MEMORY_BACKEND=memory
 ```
 
-Verify:
-
-```bash
-curl http://localhost:6333/collections
-```
-
-The backend creates its `documents` collection automatically on first run — no manual setup needed.
+For image uploads with Ollama, also pull a vision model (`ollama pull llava`) and set `OLLAMA_VISION_MODEL=llava`.
 
 ---
 
-## 5. Redis setup
+## 4. Configuration
 
-```bash
-docker run -d --name redis -p 6379:6379 redis:7-alpine
+All settings live in `backend/.env` (never committed; `backend/.env.example` is the documented template).
+
+**Choose a setup**
+
+```ini
+# Cloud (Gemini + Qdrant Cloud, no Redis)
+AI_PROVIDER=gemini
+GEMINI_API_KEY=<your key>
+QDRANT_URL=https://<cluster>.cloud.qdrant.io
+QDRANT_API_KEY=<key>
+QDRANT_VECTOR_SIZE=768
+MEMORY_BACKEND=memory
+
+# Local (Ollama + Docker Qdrant/Redis)
+AI_PROVIDER=ollama
+QDRANT_URL=
+MEMORY_BACKEND=redis
 ```
 
-Verify:
+**Always set**
 
-```bash
-docker exec -it redis redis-cli ping
-# -> PONG
-```
+| Setting | Why |
+|---|---|
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | The only login. Change the default password before deploying. |
+| `AUTH_SECRET_KEY` | Signs sessions; without it users are logged out on every restart. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+
+**Commonly changed** (defaults are the measured best values)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `AGENT_MODE` | `fallback` | `off` / `fallback` / `always` — see [Agent mode](#agent-mode) |
+| `CHAT_RATE_LIMIT_PER_MINUTE` | `20` | Questions per client IP per minute (`0` = unlimited) |
+| `RAG_SCORE_THRESHOLD` | *(unset)* | Unset = 0.5 for Gemini, 0.3 for Ollama embeddings |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `600` / `100` | Tokens per chunk; affects new uploads only |
+| `USE_SYSTEM_CERTS` | `false` | `true` on corporate networks that inspect HTTPS (`CERTIFICATE_VERIFY_FAILED`) |
+| `LOG_TO_FILE` / `LOG_DIR` | `true` / `logs` | Set `LOG_TO_FILE=false` on Render |
+
+See `backend/.env.example` for every setting with an explanation.
+
+> **Changing the embedding model or `AI_PROVIDER`?** Vectors from different models are not compatible. The app
+> refuses to use a collection with the wrong vector size and tells you so — use a new `QDRANT_COLLECTION_NAME`
+> or *Clear all* and re-upload.
 
 ---
 
-## 6. Running the backend (local Python, no Docker)
+## 5. Using the app
 
-```bash
-cd AI-RAG-Agent/backend
-python -m venv venv
-venv\Scripts\activate            # Windows
-# source venv/bin/activate       # macOS/Linux
-
-pip install -r requirements.txt
-
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Configuration lives in `backend/.env`, which is **not committed** (it holds secrets). On a fresh clone, copy the template first:
-
-```bash
-cp .env.example .env
-```
-
-It points at `localhost` for Ollama, Qdrant, and Redis — matching your local setup. Adjust it if any service runs elsewhere.
-
-### Login
-
-The app has a single admin login (no user database). Defaults: username `admin`, password `P@ss@123`.
-Change them with `ADMIN_USERNAME` / `ADMIN_PASSWORD` in `.env` — **always change the password before deploying anywhere public** —
-and set `AUTH_SECRET_KEY` to a long random string so sessions survive restarts:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
-```
-
-Once running:
-- API: `http://localhost:8000`
-- Interactive API docs (Swagger): `http://localhost:8000/docs`
-- Frontend is also served at `http://localhost:8000/app`
-
----
-
-## 7. Running the frontend
-
-The backend already serves the frontend at `/app`, so no separate step is required. If you prefer to serve it independently (e.g. with VS Code's Live Server, or any static file server):
-
-```bash
-cd AI-RAG-Agent/frontend
-python -m http.server 5500
-```
-
-Then open `http://localhost:5500`. The frontend automatically targets `http://localhost:8000` as the API base when served from a different port.
-
----
-
-## 8. Running everything with Docker Compose
-
-This starts the **backend API** and a small **nginx frontend container**. Qdrant, Redis, and Ollama are expected to already be running on the host (steps 3–5 above) — the containers reach them via `host.docker.internal`.
-
-```bash
-cd AI-RAG-Agent
-docker compose up --build
-
-# No Qdrant/Redis on the host? This also starts them as containers:
-docker compose -f docker-compose.yml -f docker-compose.infra.yml up --build
-```
-
-Settings come from `backend/.env`; compose only sets container-specific hosts and paths. The image runs as a
-non-root user and has a `HEALTHCHECK` on `/health/live`.
-
-- Frontend: `http://localhost:5500`
-- Backend API: `http://localhost:8000`
-
-Uploaded files are persisted to `./documents` on the host via a volume mount.
-
----
-
-## 9. Running tests
-
-```bash
-cd AI-RAG-Agent/backend
-pip install -r requirements-dev.txt   # runtime deps + pytest + ruff
-ruff check .
-pytest -q
-```
-
-Tests mock every external service (AI provider, Qdrant, Redis), so they run offline in a few seconds.
-GitHub Actions (`.github/workflows/ci.yml`) runs lint + tests, a frontend syntax check, and a Docker
-build/liveness check on every push and pull request to `main`.
-
----
-
-### Measuring retrieval quality
-
-`backend/eval/` holds a retrieval test set (`questions.json`) and a script that measures how often the right
-chunk is retrieved, so chunking/reranking/threshold changes are decided by numbers:
-
-```bash
-cd backend
-# put copies of your documents in eval/corpus/ (git-ignored), then:
-python -m eval.retrieval_eval --verbose
-python -m eval.retrieval_eval --configs 600:100 400:60 --modes overlap bm25 --threshold 0.45
-```
-
-It only makes embedding calls (no chat), caches them in `eval/.cache/`, and never writes to Qdrant.
-
-`eval/answer_eval.py` grades whole **answers** (required facts per question in `answer_questions.json`) for
-the normal pipeline vs agent mode vs the default fallback, using an in-memory Qdrant:
-
-```bash
-python -m eval.answer_eval --show-answers
-```
-
-It makes real chat calls (~1 per question for the pipeline, ~1-2 for the agent); answers are cached in
-`eval/.cache/answers.json`, so a run stopped by the daily quota resumes where it left off.
+- **Upload:** drop one or several files on the upload box (or click it). Files show *processing* while they
+  are indexed in the background, then *ready* (or *failed* with the reason). Re-uploading an identical file is
+  refused — delete the old copy first.
+- **Ask:** type and press Enter. *Answer language* forces the reply language (or choose *Match question's language*).
+  Press the orange ■ button to stop an answer.
+- **Sources:** click the 📄 *N sources* icon under an answer, or double-click the answer.
+- **Conversation:** kept after a page refresh; *Clear conversation* (*New chat* on phones) starts over.
+- **Phones:** the document list opens from the *Documents* button.
 
 ### Agent mode
 
-`AGENT_MODE=fallback` (default) answers most questions with the normal one-search pipeline, and hands
-multi-part questions ("compare...", "all of his projects", "both...") or weak first searches to an agent
-that can call `search_documents`, `list_documents` and `calculate_duration` (exact date maths), capped at
-`AGENT_MAX_STEPS` AI calls. Questions with no match at all still cost zero AI calls. While the agent works,
-the chat shows what it is doing ("Searching: ...") and lists what it looked up under the answer.
-Agent mode needs Gemini (function calling); with Ollama the normal pipeline is always used.
+| `AGENT_MODE` | What happens | AI calls per question |
+|---|---|---|
+| `off` | One search, one answer | 1 (2 for follow-ups) |
+| `fallback` *(default)* | Like `off`, but multi-part questions ("compare", "both", "all of…") and weak first searches go to the agent | ~1.1 on average |
+| `always` | Agent for every question | ~1.2–3 |
+
+The agent (Gemini only; Ollama always uses the normal pipeline) can call `search_documents`, `list_documents`
+and `calculate_duration`, up to `AGENT_MAX_STEPS` (3) AI calls, and must answer on the last one. While it works
+the chat shows *"Searching: …"*, and lists what it looked up under the answer. Questions with no matching
+passage at all still cost zero AI calls. On the answer test set, `fallback` answered **12/12** questions
+correctly vs **11/12** for `off`, at 1.1 calls per question.
 
 ---
 
-## 10. API documentation
-
-Base URL: `http://localhost:8000`
-
-All `/api/documents` and `/api/chat` endpoints require login: call `POST /api/auth/login` with
-`{"username": "...", "password": "..."}`, then send the returned `access_token` as
-`Authorization: Bearer <token>`. `/health` stays public. Five failed logins from one IP lock login for 5 minutes.
-
-Chat endpoints are rate limited per client IP (`CHAT_RATE_LIMIT_PER_MINUTE`, default 20; `0` disables) and return
-`429` with a `Retry-After` header when exceeded.
-
-### `POST /api/documents/upload`
-Upload a document (`multipart/form-data`, field name `file`). Accepts `.pdf`, `.docx`, `.txt`, `.csv` and images, up to 50MB.
-
-The request returns immediately with **`202 Accepted`** and `"status": "processing"`; indexing continues in the
-background. Poll `GET /api/documents` until the document's status is `ready` (or `failed`, with `error_message`).
-Add `?wait=true` to block until processing finishes instead (returns `201`, as before).
+## 6. Running with Docker Compose
 
 ```bash
-curl -X POST http://localhost:8000/api/documents/upload \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "file=@./contract.pdf"
+docker compose up --build                     # app + nginx frontend; services from the host / cloud
+docker compose -f docker-compose.yml -f docker-compose.infra.yml up --build   # also starts Qdrant + Redis
 ```
 
-Response `202`:
-```json
-{
-  "document_id": "b3f1c2a4-...",
-  "filename": "contract.pdf",
-  "status": "processing",
-  "chunk_count": 0,
-  "message": "Upload received; the document is being indexed in the background"
-}
+Settings come from `backend/.env`; compose only sets container hostnames and paths. Frontend:
+`http://localhost:5500`, API: `http://localhost:8000`. The image runs as a non-root user with a
+`HEALTHCHECK` on `/health/live`. Uploaded files persist in `./documents`.
+
+---
+
+## 7. Development
+
+```bat
+cd backend
+venv\Scripts\activate.bat
+ruff check .        # lint
+pytest -q           # 140 tests, fully offline, ~3 seconds
 ```
 
-### `GET /api/documents`
-List all uploaded documents and their status.
+GitHub Actions (`.github/workflows/ci.yml`) runs lint + tests, a frontend syntax check and a Docker
+build/liveness check on every push and pull request to `main`. Render deploys `main` automatically.
+
+See **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** for architecture, conventions and how to extend the code.
+
+---
+
+## 8. Measuring quality
+
+Two scripts in `backend/eval/` decide settings with numbers. Put copies of your documents in
+`backend/eval/corpus/` (git-ignored — it usually contains personal files). Neither script writes to your
+real Qdrant collection.
+
+```bat
+:: Retrieval: is the right passage found? (embedding calls only, cached)
+python -m eval.retrieval_eval --verbose
+python -m eval.retrieval_eval --configs 600:100 400:60 --modes overlap bm25 --headers off embed
+
+:: Answers: does the final answer contain the required facts? pipeline vs agent vs fallback
+python -m eval.answer_eval --show-answers
+```
+
+`answer_eval` makes real chat calls (~1 per question per mode) using an in-memory Qdrant; answers are cached
+in `eval/.cache/`, so a run stopped by the free-tier daily quota resumes where it left off.
+
+Current results (36 retrieval questions / 12 answer questions):
+
+| Measurement | Result |
+|---|---|
+| Right passage ranked #1 / in top 5 | 88% / 100% (600-token chunks, keyword rerank) |
+| Without the rerank step | 70% ranked #1 |
+| Answers correct: pipeline / agent / fallback | 11/12 / 12/12 / **12/12** |
+
+> The *match %* on source cards is semantic similarity, not "% correct". With Gemini embeddings even perfect
+> matches typically show 55–75%. Tried and measured: section headers in embeddings and 3072-dim embeddings
+> did not improve results, so they are off.
+
+---
+
+## 9. API reference
+
+Base URL `http://localhost:8000`. Interactive docs at `/docs`.
+
+**Auth:** `POST /api/auth/login` with `{"username": "...", "password": "..."}` returns `access_token`; send it as
+`Authorization: Bearer <token>` on every `/api/documents` and `/api/chat` call. Five failed logins from one IP
+lock login for 5 minutes. Every response carries an `X-Request-ID` header (quote it when reporting an error).
+
+| Method & path | Purpose |
+|---|---|
+| `POST /api/auth/login` · `GET /api/auth/me` · `POST /api/auth/logout` | Session |
+| `POST /api/documents/upload` | Upload one file (`multipart/form-data`, field `file`). Returns **202** `processing`; add `?wait=true` to block until indexed (201). 409 if it is a duplicate. |
+| `GET /api/documents` | List documents with `status` (`processing` / `ready` / `failed`) and `error_message` |
+| `DELETE /api/documents/{id}` · `DELETE /api/documents` | Delete one / all |
+| `POST /api/chat` | Ask; returns `{conversation_id, answer, sources}` |
+| `POST /api/chat/stream` | Ask; Server-Sent Events: `status` (agent progress), `token`, then `done` (with `sources`, `agent_steps`) or `error` |
+| `GET /api/chat/history/{conversation_id}` | Stored turns (404 if none) |
+| `GET /health/live` | Instant liveness (no backend calls) — use for host health checks |
+| `GET /health` | AI provider, Qdrant and memory backend status |
+
+Chat endpoints are rate limited (`CHAT_RATE_LIMIT_PER_MINUTE`) and return `429` with `Retry-After` when exceeded.
 
 ```bash
-curl http://localhost:8000/api/documents
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"P@ss@123"}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+curl -X POST "http://localhost:8000/api/documents/upload?wait=true" -H "Authorization: Bearer $TOKEN" -F "file=@./resume.pdf"
+
+curl -X POST http://localhost:8000/api/chat -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"question": "What was his CGPA?"}'
 ```
 
-```json
-{
-  "total": 1,
-  "documents": [
-    {
-      "document_id": "b3f1c2a4-...",
-      "filename": "contract.pdf",
-      "file_extension": ".pdf",
-      "file_size_bytes": 184320,
-      "status": "ready",
-      "chunk_count": 42,
-      "created_date": "2026-07-25T07:00:00Z",
-      "error_message": null
-    }
-  ]
-}
-```
-
-### `POST /api/chat`
-Ask a question. Omit `conversation_id` to start a new conversation.
-
-```bash
-curl -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the termination clause?", "conversation_id": null}'
-```
-
-```json
-{
-  "conversation_id": "9c8a7b6d-...",
-  "question": "What is the termination clause?",
-  "answer": "According to the contract, either party may terminate with 30 days written notice...",
-  "sources": [
-    {
-      "document_id": "b3f1c2a4-...",
-      "filename": "contract.pdf",
-      "chunk_id": "e1d2c3b4-...",
-      "chunk_text": "Either party may terminate this agreement by providing thirty (30) days...",
-      "score": 0.84
-    }
-  ]
-}
-```
-
-### `GET /api/chat/history/{conversation_id}`
-Retrieve the stored turns for a conversation. Returns `404` if no history exists yet.
-
-```bash
-curl http://localhost:8000/api/chat/history/9c8a7b6d-...
-```
-
-### `GET /health/live`
-Instant liveness probe that calls no backing services — point your host's health check (Render, Docker) here.
-
-### `GET /health`
-Reports connectivity to Ollama, Qdrant, and Redis.
-
-```bash
-curl http://localhost:8000/health
-```
+A source in a chat response:
 
 ```json
 {
-  "status": "healthy",
-  "services": {
-    "api": "healthy",
-    "ollama": "healthy",
-    "qdrant": "healthy",
-    "redis": "healthy"
-  }
+  "document_id": "b3f1c2a4-...", "filename": "resume.pdf", "chunk_id": "e1d2c3b4-...",
+  "chunk_text": "EDUCATION ... CGPA: 7.45 / 10", "score": 0.66,
+  "page_start": 2, "page_end": 2, "section": "EDUCATION"
 }
 ```
 
 ---
 
-## 11. Project structure
+## 10. Project structure
 
 ```
 AI-RAG-Agent/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                 FastAPI app, CORS, routers, lifespan
-│   │   ├── api/                    upload_routes, chat_routes, health_routes
-│   │   ├── core/                   config, logging, security
-│   │   ├── services/                document/chunking/embedding/ollama/qdrant/redis/rag
-│   │   ├── models/                  Document, DocumentChunk, ChatTurn, SourceReference
-│   │   ├── schemas/                 Pydantic request/response schemas
-│   │   └── utils/                   file_utils
-│   ├── tests/                       pytest suite (mocked external services)
-│   ├── requirements.txt
-│   ├── .env.example        # copy to .env (not committed)
-│   ├── pytest.ini
+│   │   ├── main.py            app, middleware (CORS, request IDs), routers, lifespan
+│   │   ├── api/               auth, upload (documents), chat, health routes
+│   │   ├── core/              config, auth, rate_limit, request_id, security, logging, tls
+│   │   ├── services/          rag (orchestrator), agent, chunking, document, embedding,
+│   │   │                      gemini, ollama, qdrant, redis, memory_store, rerank,
+│   │   │                      provider_errors, container (shared instances)
+│   │   ├── models/            Document, DocumentChunk, ChatTurn, SourceReference
+│   │   ├── schemas/           API request/response models
+│   │   └── utils/             file, language and small-talk helpers
+│   ├── eval/                  retrieval_eval.py, answer_eval.py + question sets (corpus/ git-ignored)
+│   ├── tests/                 pytest suite (all external services mocked)
+│   ├── .env.example           settings template (copy to .env)
+│   ├── requirements.txt       runtime deps   ·  requirements-dev.txt  + pytest, ruff
+│   ├── pyproject.toml         ruff config    ·  pytest.ini
 │   └── Dockerfile
-├── frontend/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-├── documents/                       uploaded files land here
-├── docker-compose.yml
-├── .gitignore
-└── README.md
+├── frontend/                  login.html, index.html, auth.js, app.js, style.css
+├── documents/                 uploaded files (git-ignored)
+├── .github/workflows/ci.yml   CI
+├── docker-compose.yml         ·  docker-compose.infra.yml (optional Qdrant + Redis)
+├── IMPROVEMENT_PLAN.md        what was changed and measured, phase by phase
+└── FREE_CLOUD_DEPLOYMENT.md   Gemini + Qdrant Cloud + Render setup
 ```
 
 ---
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `/health` shows `ollama: unreachable` | Ollama isn't running | Start Ollama, confirm `curl http://localhost:11434/api/version` |
-| `/health` shows `qdrant: unreachable` | Qdrant container not running | `docker start qdrant`, confirm port 6333 is free |
-| `/health` shows `redis: unreachable` | Redis container not running | `docker start redis` |
-| Upload returns `415` | File extension not in `.pdf/.docx/.txt/.csv` | Convert or re-save the file in a supported format |
-| Upload returns `422` | Text extraction produced no content (e.g. scanned/image-only PDF) | Use a text-based PDF, or OCR it first |
-| Gemini calls fail with `CERTIFICATE_VERIFY_FAILED` (local only) | A corporate network is inspecting HTTPS with its own certificate | Set `USE_SYSTEM_CERTS=true` in `.env` so Python trusts the OS certificate store |
-| Chat answers "I couldn't find any relevant information" | No matching chunks above the similarity threshold | Upload a document that covers the topic, or lower `RAG_SCORE_THRESHOLD` in `.env` |
+| `pip install -r requirements-dev.txt`: *No such file* | Not in the `backend` folder | `cd /d "<path>\AI-RAG-Agent\backend"` first |
+| `pytest` / `uvicorn` *not recognized* | venv not activated (cmd needs `activate.bat`, not `.ps1`) | `venv\Scripts\activate.bat` — the prompt should start with `(venv)` |
+| Redirected to the login page | Session expired or `AUTH_SECRET_KEY` changed / unset across a restart | Sign in again; set a fixed `AUTH_SECRET_KEY` |
+| `CERTIFICATE_VERIFY_FAILED` calling Gemini (local only) | Corporate network inspects HTTPS | `USE_SYSTEM_CERTS=true` in `.env` |
+| "Gemini's free-tier DAILY request limit has been used up" | Free quota exhausted | Wait for the reset (midnight Pacific Time), or use `AGENT_MODE=off` to save calls |
+| `429 Too many questions` | `CHAT_RATE_LIMIT_PER_MINUTE` reached | Wait a minute or raise the limit |
+| "Qdrant collection … stores N-dim vectors" | Embedding model / provider changed | New `QDRANT_COLLECTION_NAME`, or *Clear all* and re-upload |
+| Upload `409` | Identical file already uploaded | Delete the existing document first |
+| Upload `415` | Unsupported file type | Use PDF, DOCX, TXT, CSV or an image |
+| Document *failed*: "No extractable text" | Empty file, or a scan the vision model couldn't read | Check the file; scanned PDFs are OCR'd up to `MAX_OCR_PAGES` pages |
+| "I couldn't find any relevant information" | No passage above the score threshold | Rephrase, upload a document that covers it, or lower `RAG_SCORE_THRESHOLD` |
+| `/health` shows `ollama: unreachable` | Ollama not running (local mode) | Start Ollama; `curl http://localhost:11434/api/version` |
+| `/health` shows `qdrant`/`redis: unreachable` | Container stopped / wrong URL | `docker start qdrant` / `docker start redis`, or check `QDRANT_URL` / `REDIS_URL` |
