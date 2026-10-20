@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["venv", ".venv", "eval/corpus"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, warnings, import order, bugbear, pyupgrade
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "B008",  # FastAPI's `Depends(...)` in argument defaults is the intended pattern
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and the eval script put the backend on sys.path before importing the app.
+"tests/*" = ["E402"]
+"eval/*" = ["E402"]

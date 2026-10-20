@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     app_name: str = "AI RAG Agent"
     app_env: str = "development"
     log_level: str = "INFO"
+    log_to_file: bool = True
+    log_dir: str = "logs"
+    # Verify outgoing HTTPS against the OS certificate store instead of Python's
+    # bundled list -- needed on corporate networks that inspect HTTPS (see core/tls.py).
+    use_system_certs: bool = False
     max_upload_size_mb: int = 50
     upload_dir: str = "../documents"
     cors_origins: str = "*"

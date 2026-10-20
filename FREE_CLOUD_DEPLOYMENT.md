@@ -68,7 +68,7 @@ Render deploys directly from a GitHub repo.
    git push -u origin main
    ```
 
-Your `.gitignore` already excludes `venv/`, `.env.local`, logs, and uploaded documents, so nothing sensitive or bulky gets pushed. Note: your real `backend/.env` file with actual secrets **will** get pushed as-is right now since it only has placeholders — you'll set the real secrets as Render environment variables instead (Step 5), not by editing `.env` in the repo.
+Your `.gitignore` excludes `backend/.env` (your real secrets), `venv/`, logs, and uploaded documents, so nothing sensitive or bulky gets pushed. `backend/.env.example` is the committed template; the real values go into Render's environment variables (Step 5).
 
 ---
 
@@ -86,6 +86,7 @@ Your `.gitignore` already excludes `venv/`, `.env.local`, logs, and uploaded doc
    | **Build Command** | `pip install -r requirements.txt` |
    | **Start Command** | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
    | **Instance Type** | `Free` |
+   | **Health Check Path** (Settings → Health Checks) | `/health/live` |
 
 5. Before clicking "Create Web Service," scroll to **Environment Variables** and add these (this is where your real secrets go — never commit them to `.env` in the repo):
 
@@ -108,7 +109,18 @@ Your `.gitignore` already excludes `venv/`, `.env.local`, logs, and uploaded doc
    UPLOAD_DIR=/opt/render/project/src/documents
    CORS_ORIGINS=*
    LOG_LEVEL=INFO
+   LOG_TO_FILE=false
+
+   # Login (single admin user) -- choose your own password
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=<a strong password>
+   # Long random string; keeps users logged in across restarts/wake-ups. Generate with:
+   #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   AUTH_SECRET_KEY=<random string>
    ```
+
+   Everything else (chunk size, score threshold, rate limit, ...) has sensible defaults; see
+   `backend/.env.example` for the full list.
 
    Leave `QDRANT_HOST`/`QDRANT_PORT`/`REDIS_HOST`/`REDIS_PORT` unset — they're ignored automatically once `QDRANT_URL`/`REDIS_URL` are set.
 

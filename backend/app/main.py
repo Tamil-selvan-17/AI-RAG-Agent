@@ -17,9 +17,12 @@ from app.api import auth_routes, chat_routes, health_routes, upload_routes
 from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.logging import logger
+from app.core.request_id import RequestIdMiddleware
+from app.core.tls import configure_tls
 from app.services.container import build_services
 
 settings = get_settings()
+configure_tls()  # before any HTTP client is created
 
 
 @asynccontextmanager
@@ -55,7 +58,10 @@ app.add_middleware(
     allow_credentials=settings.cors_origin_list != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
+# Added last so it wraps everything (including CORS) and every log line has an ID.
+app.add_middleware(RequestIdMiddleware)
 
 
 @app.exception_handler(HTTPException)
@@ -71,7 +77,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An unexpected internal error occurred."},
+        content={"detail": "An unexpected internal error occurred. Quote the X-Request-ID header "
+                 "when reporting this so it can be found in the logs."},
     )
 
 

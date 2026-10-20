@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint + tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        # Tests mock every external service; no Qdrant/Redis/AI keys needed.
+        run: pytest -q
+
+  frontend:
+    name: Frontend (syntax check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check JavaScript syntax
+        run: for f in frontend/*.js; do node --check "$f"; done
+
+  docker:
+    name: Docker image builds and starts
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t ai-rag-backend ./backend
+      - name: Start container and wait for liveness
+        run: |
+          docker run -d --name app -p 8000:8000 -e MEMORY_BACKEND=memory -e LOG_TO_FILE=false ai-rag-backend
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health/live; then exit 0; fi
+            sleep 1
+          done
+          docker logs app
+          exit 1

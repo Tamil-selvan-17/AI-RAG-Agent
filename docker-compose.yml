@@ -1,10 +1,14 @@
-# Docker Compose for the AI RAG Agent application layer only.
+# Docker Compose for the AI RAG Agent.
 #
-# Qdrant, Redis, and Ollama are assumed to already be running on the host
-# machine (per the project's local environment setup) and are reached via
-# host.docker.internal from inside these containers.
+# Settings (AI provider, models, API keys, ADMIN_PASSWORD, ...) come from
+# backend/.env. Only container-specific values (hostnames, paths) are set here.
 #
-# Start with:  docker compose up --build
+# By default Qdrant, Redis and Ollama are expected on the host machine (or in
+# the cloud via QDRANT_URL / REDIS_URL in backend/.env) and are reached via
+# host.docker.internal.
+#
+#   App only:                   docker compose up --build
+#   App + Qdrant + Redis too:   docker compose -f docker-compose.yml -f docker-compose.infra.yml up --build
 
 services:
   backend:
@@ -14,25 +18,15 @@ services:
     container_name: ai-rag-backend
     ports:
       - "8000:8000"
-    # Secrets and settings (ADMIN_PASSWORD, AUTH_SECRET_KEY, GEMINI_API_KEY, ...)
-    # come from backend/.env; the values under `environment:` override it.
     env_file:
       - path: ./backend/.env
         required: false
     environment:
       OLLAMA_URL: http://host.docker.internal:11434
-      OLLAMA_CHAT_MODEL: qwen2.5:7b
-      OLLAMA_EMBED_MODEL: bge-m3
       QDRANT_HOST: host.docker.internal
-      QDRANT_PORT: 6333
-      QDRANT_GRPC_PORT: 6334
-      QDRANT_COLLECTION_NAME: documents
-      QDRANT_VECTOR_SIZE: 1024
       REDIS_HOST: host.docker.internal
-      REDIS_PORT: 6379
       UPLOAD_DIR: /app/documents
-      CORS_ORIGINS: "*"
-      LOG_LEVEL: INFO
+      LOG_DIR: /app/logs
     volumes:
       - ./documents:/app/documents
       - ./backend/logs:/app/logs

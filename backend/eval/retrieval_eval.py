@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import get_settings  # noqa: E402
+from app.core.tls import configure_tls  # noqa: E402
 from app.services.chunking_service import ChunkingService  # noqa: E402
 from app.services.document_service import DocumentService  # noqa: E402
 from app.services.rerank_service import rerank  # noqa: E402
@@ -212,6 +213,7 @@ def check_evidence_exists(documents: dict[str, str], questions: list[dict]) -> N
 
 
 async def main() -> None:
+    configure_tls()
     settings = get_settings()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--corpus-dir", type=Path, default=EVAL_DIR / "corpus")

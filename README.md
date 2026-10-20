@@ -172,7 +172,13 @@ This starts the **backend API** and a small **nginx frontend container**. Qdrant
 ```bash
 cd AI-RAG-Agent
 docker compose up --build
+
+# No Qdrant/Redis on the host? This also starts them as containers:
+docker compose -f docker-compose.yml -f docker-compose.infra.yml up --build
 ```
+
+Settings come from `backend/.env`; compose only sets container-specific hosts and paths. The image runs as a
+non-root user and has a `HEALTHCHECK` on `/health/live`.
 
 - Frontend: `http://localhost:5500`
 - Backend API: `http://localhost:8000`
@@ -185,11 +191,14 @@ Uploaded files are persisted to `./documents` on the host via a volume mount.
 
 ```bash
 cd AI-RAG-Agent/backend
-pip install -r requirements.txt
-pytest -v
+pip install -r requirements-dev.txt   # runtime deps + pytest + ruff
+ruff check .
+pytest -q
 ```
 
-Tests cover the upload API, chat API, chunking service, and embedding service, using mocked Ollama/Qdrant/Redis clients so they run without any external services.
+Tests mock every external service (AI provider, Qdrant, Redis), so they run offline in a few seconds.
+GitHub Actions (`.github/workflows/ci.yml`) runs lint + tests, a frontend syntax check, and a Docker
+build/liveness check on every push and pull request to `main`.
 
 ---
 
@@ -365,4 +374,5 @@ AI-RAG-Agent/
 | `/health` shows `redis: unreachable` | Redis container not running | `docker start redis` |
 | Upload returns `415` | File extension not in `.pdf/.docx/.txt/.csv` | Convert or re-save the file in a supported format |
 | Upload returns `422` | Text extraction produced no content (e.g. scanned/image-only PDF) | Use a text-based PDF, or OCR it first |
+| Gemini calls fail with `CERTIFICATE_VERIFY_FAILED` (local only) | A corporate network is inspecting HTTPS with its own certificate | Set `USE_SYSTEM_CERTS=true` in `.env` so Python trusts the OS certificate store |
 | Chat answers "I couldn't find any relevant information" | No matching chunks above the similarity threshold | Upload a document that covers the topic, or lower `RAG_SCORE_THRESHOLD` in `.env` |
