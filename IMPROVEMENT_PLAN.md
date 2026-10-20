@@ -48,15 +48,18 @@ Tracks the improvement work for the AI RAG Agent. `[x]` = done, `[ ]` = pending.
 - [x] Rate limiting on `/api/chat` (`CHAT_RATE_LIMIT_PER_MINUTE`, per client IP)
 - [x] `/health/live` endpoint for host pings (no backend calls)
 
-## Phase 3 — Answer quality
-- [ ] Evaluation set (20-30 question -> expected chunk) + hit-rate script
-- [ ] Smaller chunks (300-500 tokens) with word-boundary overlap, tuned using the eval set
-- [ ] Page numbers in chunk metadata, shown in source cards
-- [ ] Duplicate-upload detection by content hash
-- [ ] Scanned-PDF fallback to vision OCR
-- [ ] `OLLAMA_VISION_MODEL` setting for image uploads
-- [ ] Qdrant hybrid search (dense + sparse/BM25) or cross-encoder reranker
-- [ ] Send history as real chat messages instead of text in the prompt
+## Phase 3 — Answer quality (done)
+- [x] Retrieval eval: 36 questions (`backend/eval/questions.json`) + `python -m eval.retrieval_eval`
+- [x] Chunks 600/100 tokens (was 1000/200): same hit@1 (88%) and hit@5 (100%), 34% less context per answer
+- [x] Word-boundary overlap; no marker-only chunks
+- [x] Score threshold per embedding model (Gemini 0.5, Ollama 0.3) -- 0.3 matched every off-topic question on Gemini
+- [x] BM25 rerank mode evaluated: no gain over keyword overlap on this corpus, kept as `RAG_RERANK_MODE=bm25` option
+- [x] Page numbers in chunk metadata, shown in source cards and given to the LLM
+- [x] Duplicate-upload detection by content hash (409), survives registry resets via Qdrant
+- [x] Scanned-PDF fallback to vision OCR (`MAX_OCR_PAGES`)
+- [x] `OLLAMA_VISION_MODEL` setting for image uploads / scanned PDFs
+- [x] Conversation history sent as real chat turns (user/model messages) instead of text in the prompt
+- [ ] Re-evaluate chunking/BM25/threshold when more documents are uploaded (corpus is small today)
 
 ## Phase 4 — Engineering hygiene
 - [ ] `RagService` unit tests with fake backends; CI (GitHub Actions) with pytest + ruff

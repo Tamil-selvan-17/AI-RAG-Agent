@@ -1,6 +1,6 @@
 """Domain models representing chat turns and source references."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,9 @@ class SourceReference(BaseModel):
     chunk_id: str
     chunk_text: str
     score: float
+    # PDF page range the chunk came from (None for non-PDF / older uploads).
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 class ChatTurn(BaseModel):
@@ -22,4 +25,4 @@ class ChatTurn(BaseModel):
     question: str
     answer: str
     sources: list[SourceReference] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

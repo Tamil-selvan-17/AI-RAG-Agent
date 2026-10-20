@@ -63,13 +63,6 @@ class MemoryStoreService:
     async def get_conversation_history(self, conversation_id: str, limit: int = 20) -> list[ChatTurn]:
         return list(self._conversations.get(conversation_id, [])[-limit:])
 
-    async def get_recent_context(self, conversation_id: str, max_turns: int = 3) -> str:
-        turns = await self.get_conversation_history(conversation_id, limit=max_turns)
-        if not turns:
-            return ""
-        lines = [f"User: {t.question}\nAssistant: {t.answer}" for t in turns]
-        return "\n\n".join(lines)
-
     # ------------------------------------------------------------------ #
     # Document registry
     # ------------------------------------------------------------------ #

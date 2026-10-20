@@ -35,6 +35,7 @@ class OllamaService:
         self.base_url = settings.ollama_url.rstrip("/")
         self.embed_model = settings.ollama_embed_model
         self.chat_model = settings.ollama_chat_model
+        self.vision_model = settings.ollama_vision_model or settings.ollama_chat_model
         self.timeout = settings.ollama_timeout_seconds
         self._http: httpx.AsyncClient | None = None
 
@@ -110,6 +111,7 @@ class OllamaService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        history: list[tuple[str, str]] | None = None,
     ):
         """Yield answer tokens one at a time as Ollama generates them.
 
@@ -128,6 +130,14 @@ class OllamaService:
             "model": self.chat_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
+                *(
+                    message
+                    for question, answer in history or []
+                    for message in (
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": answer},
+                    )
+                ),
                 {"role": "user", "content": user_prompt},
             ],
             "stream": True,
@@ -180,6 +190,7 @@ class OllamaService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        history: list[tuple[str, str]] | None = None,
     ) -> str:
         """Generate a complete chat response by collecting the full token stream.
 
@@ -188,7 +199,7 @@ class OllamaService:
         generated, use stream_chat_response instead.
         """
         content_parts: list[str] = []
-        async for token in self.stream_chat_response(system_prompt, user_prompt, temperature):
+        async for token in self.stream_chat_response(system_prompt, user_prompt, temperature, history):
             content_parts.append(token)
 
         content = "".join(content_parts).strip()
@@ -202,14 +213,13 @@ class OllamaService:
     async def describe_image(self, image_bytes: bytes, mime_type: str) -> str:
         """Generate a text description of an image via Ollama's vision-capable models.
 
-        Requires OLLAMA_CHAT_MODEL to be set to a vision-capable model (e.g. llava,
-        bakllava, moondream, qwen2.5-vl) -- a text-only model like the default
-        qwen2.5:7b will simply ignore the image data and produce an unrelated or
-        empty response. If you plan to upload images with AI_PROVIDER=ollama, pull
-        and configure a vision model first: `ollama pull llava`.
+        Uses OLLAMA_VISION_MODEL (falling back to OLLAMA_CHAT_MODEL), which must be
+        vision-capable (e.g. llava, moondream, qwen2.5vl) -- a text-only model like
+        the default qwen2.5:7b ignores the image and returns an unrelated or empty
+        response. Set it up with e.g. `ollama pull llava` and OLLAMA_VISION_MODEL=llava.
         """
         payload = {
-            "model": self.chat_model,
+            "model": self.vision_model,
             "messages": [
                 {
                     "role": "user",
@@ -238,8 +248,8 @@ class OllamaService:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=(
-                    f"Ollama couldn't process the image -- is {self.chat_model} a "
-                    f"vision-capable model? (e.g. `ollama pull llava`). Details: {body_text}"
+                    f"Ollama couldn't process the image -- is {self.vision_model} a "
+                    f"vision-capable model? Set OLLAMA_VISION_MODEL (e.g. llava). Details: {body_text}"
                 ),
             ) from exc
         except httpx.TransportError as exc:  # read errors, dropped connections, etc.
@@ -250,9 +260,9 @@ class OllamaService:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=(
-                    f"Ollama returned an empty image description. {self.chat_model} may "
-                    "not support vision -- try `ollama pull llava` and set it as "
-                    "OLLAMA_CHAT_MODEL, or switch AI_PROVIDER to gemini for image support."
+                    f"Ollama returned an empty image description. {self.vision_model} may "
+                    "not support vision -- try `ollama pull llava` and set "
+                    "OLLAMA_VISION_MODEL=llava, or switch AI_PROVIDER to gemini."
                 ),
             )
         return content

@@ -80,14 +80,6 @@ class RedisService:
             ) from exc
         return [ChatTurn.model_validate_json(raw) for raw in raw_turns]
 
-    async def get_recent_context(self, conversation_id: str, max_turns: int = 3) -> str:
-        """Return a compact string of recent Q/A turns for prompt context."""
-        turns = await self.get_conversation_history(conversation_id, limit=max_turns)
-        if not turns:
-            return ""
-        lines = [f"User: {t.question}\nAssistant: {t.answer}" for t in turns]
-        return "\n\n".join(lines)
-
     # ------------------------------------------------------------------ #
     # Document registry
     # ------------------------------------------------------------------ #

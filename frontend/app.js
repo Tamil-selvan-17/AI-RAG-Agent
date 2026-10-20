@@ -377,6 +377,14 @@ function toggleSources(wrapEl) {
   if (show) sourcesEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
+function formatPages(source) {
+  if (!source.page_start) return '';
+  const range = source.page_end && source.page_end !== source.page_start
+    ? `pp. ${source.page_start}–${source.page_end}`
+    : `p. ${source.page_start}`;
+  return ` <span class="source-page">· ${range}</span>`;
+}
+
 function renderAnswerContent(wrapEl, answer, sources) {
   let sourcesHtml = '';
   const hasSources = sources && sources.length > 0;
@@ -393,7 +401,7 @@ function renderAnswerContent(wrapEl, answer, sources) {
         ${sources.map(s => `
           <div class="source-card">
             <div class="source-card-top">
-              <span class="source-filename">${escapeHtml(s.filename)}</span>
+              <span class="source-filename">${escapeHtml(s.filename)}${formatPages(s)}</span>
               <span class="source-score">match ${(s.score * 100).toFixed(0)}%</span>
             </div>
             <p class="source-excerpt">${escapeHtml(s.chunk_text)}</p>

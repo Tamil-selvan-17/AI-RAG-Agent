@@ -1,0 +1,260 @@
+{
+  "description": "Retrieval test set. A question is answered correctly at rank N if the Nth retrieved chunk contains any of its `evidence` strings (case/whitespace-insensitive). Questions with empty evidence are unanswerable from the corpus and should ideally retrieve nothing above the score threshold.",
+  "questions": [
+    {
+      "id": "exp-years",
+      "question": "How many years of experience does Tamilselvan have?",
+      "evidence": [
+        "4+ years of experience"
+      ]
+    },
+    {
+      "id": "start-date",
+      "question": "When did he join Nova Techset?",
+      "evidence": [
+        "Jun 2022"
+      ]
+    },
+    {
+      "id": "current-title",
+      "question": "What is his current job title?",
+      "evidence": [
+        "Associate Software Engineer (Sep 2024"
+      ]
+    },
+    {
+      "id": "junior-promotion",
+      "question": "When was he promoted to Junior Software Engineer?",
+      "evidence": [
+        "Junior Software Engineer (Mar 2023"
+      ]
+    },
+    {
+      "id": "dotnet-versions",
+      "question": "Which versions of .NET has he worked with?",
+      "evidence": [
+        ".NET 6, .NET 8 and .NET 10",
+        ".NET 6, .NET 8,"
+      ]
+    },
+    {
+      "id": "angular-versions",
+      "question": "What Angular versions does he know?",
+      "evidence": [
+        "Angular 14–20",
+        "Angular (14–20)"
+      ]
+    },
+    {
+      "id": "databases",
+      "question": "What databases has he used?",
+      "evidence": [
+        "SQL Server (Stored Procedures",
+        "MongoDB, Redis"
+      ]
+    },
+    {
+      "id": "backend-perf",
+      "question": "By how much did he improve backend performance?",
+      "evidence": [
+        "roughly 15%"
+      ]
+    },
+    {
+      "id": "npms-what",
+      "question": "What is nPMS?",
+      "evidence": [
+        "nPMS - Project Management & Email Monitoring System"
+      ]
+    },
+    {
+      "id": "npms-tech",
+      "question": "Which technologies were used in the nPMS project?",
+      "evidence": [
+        "Angular 20, TypeScript, ASP.NET Core (.NET 10), C#, MongoDB"
+      ]
+    },
+    {
+      "id": "npms-sla",
+      "question": "How does the email monitoring system flag SLA slippage?",
+      "evidence": [
+        "after 20 hours"
+      ]
+    },
+    {
+      "id": "nvms-freelancers",
+      "question": "How many freelancers does the vendor management system handle?",
+      "evidence": [
+        "300+ freelancers"
+      ]
+    },
+    {
+      "id": "nvms-overhead",
+      "question": "How much administrative overhead did the vendor onboarding modules save?",
+      "evidence": [
+        "administrative overhead by 30%"
+      ]
+    },
+    {
+      "id": "nvms-tech",
+      "question": "nVMS tech stack",
+      "evidence": [
+        "Tailwind CSS, ASP.NET Core (.NET 6)"
+      ]
+    },
+    {
+      "id": "nedit-tracking",
+      "question": "How was change tracking implemented in nEDIT?",
+      "evidence": [
+        "ICE Plugin for revision history"
+      ]
+    },
+    {
+      "id": "sesame-what",
+      "question": "What is the Sesame project?",
+      "evidence": [
+        "Sesame - Article Tracking"
+      ]
+    },
+    {
+      "id": "sesame-api",
+      "question": "Which API framework does Sesame use?",
+      "evidence": [
+        "ASP.NET Web API 2 endpoints",
+        "ASP.NET Web API 2, .NET Framework 4"
+      ]
+    },
+    {
+      "id": "college",
+      "question": "Where did he study?",
+      "evidence": [
+        "Alpha Engineering College"
+      ]
+    },
+    {
+      "id": "cgpa",
+      "question": "What was his CGPA?",
+      "evidence": [
+        "7.45"
+      ]
+    },
+    {
+      "id": "grad-year",
+      "question": "When did he graduate?",
+      "evidence": [
+        "Anna University | 2021"
+      ]
+    },
+    {
+      "id": "personal-project",
+      "question": "What personal project has he built?",
+      "evidence": [
+        "AI RAG Assistant"
+      ]
+    },
+    {
+      "id": "rag-deploy",
+      "question": "Where is his RAG assistant deployed?",
+      "evidence": [
+        "deployment to Render",
+        "Render.com"
+      ]
+    },
+    {
+      "id": "ollama-models",
+      "question": "Which local models did he use with Ollama?",
+      "evidence": [
+        "bge-m3 and qwen2.5:7b",
+        "ollama pull qwen2.5:7b"
+      ]
+    },
+    {
+      "id": "signalr",
+      "question": "What has he used SignalR for?",
+      "evidence": [
+        "real-time collaboration features with SignalR",
+        "SignalR features that keep editing"
+      ]
+    },
+    {
+      "id": "docker",
+      "question": "Does he have Docker experience?",
+      "evidence": [
+        "Containerized applications with Docker",
+        "Containerized the application using Docker"
+      ]
+    },
+    {
+      "id": "security",
+      "question": "What security features has he implemented?",
+      "evidence": [
+        "JWT and role-based access control (RBAC)",
+        "JWT authentication and role-based authorization"
+      ]
+    },
+    {
+      "id": "aws",
+      "question": "Which AWS service has he worked with?",
+      "evidence": [
+        "AWS S3"
+      ]
+    },
+    {
+      "id": "tamil-company",
+      "question": "தமிழ்செல்வன் எந்த நிறுவனத்தில் வேலை செய்கிறார்?",
+      "evidence": [
+        "Nova Techset Pvt. Ltd."
+      ]
+    },
+    {
+      "id": "image-subject",
+      "question": "What does the Murugan picture show?",
+      "evidence": [
+        "Hindu deity Murugan"
+      ]
+    },
+    {
+      "id": "image-weapon",
+      "question": "What is the child holding in the image?",
+      "evidence": [
+        "\"Vel,\""
+      ]
+    },
+    {
+      "id": "image-watermark",
+      "question": "What text is written in the image watermark?",
+      "evidence": [
+        "WALLPAPER.COM HINDU GOD"
+      ]
+    },
+    {
+      "id": "readme-qdrant-port",
+      "question": "Which docker command starts Qdrant locally?",
+      "evidence": [
+        "docker run -d --name qdrant"
+      ]
+    },
+    {
+      "id": "readme-render-sleep",
+      "question": "Does the free Render instance sleep when idle?",
+      "evidence": [
+        "Sleeps after 15 min idle"
+      ]
+    },
+    {
+      "id": "none-capital",
+      "question": "What is the capital of France?",
+      "evidence": []
+    },
+    {
+      "id": "none-salary",
+      "question": "What is his current salary?",
+      "evidence": []
+    },
+    {
+      "id": "none-recipe",
+      "question": "How do I bake sourdough bread?",
+      "evidence": []
+    }
+  ]
+}

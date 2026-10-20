@@ -531,6 +531,13 @@ body {
   color: var(--ink);
 }
 
+.source-page {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--ink-faint);
+}
+
 .source-score {
   font-family: var(--font-mono);
   font-size: 10.5px;

@@ -1,6 +1,6 @@
 """Domain models representing documents and their chunks."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -22,7 +22,7 @@ class DocumentChunk(BaseModel):
     chunk_index: int
     total_chunks: int
     metadata: dict = Field(default_factory=dict)
-    created_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_date: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class Document(BaseModel):
@@ -35,7 +35,9 @@ class Document(BaseModel):
     # Name of the file on disk (unique per document). None for documents saved
     # before this field existed, which were stored under their plain filename.
     stored_filename: str | None = None
+    # SHA-256 of the uploaded bytes, used to reject duplicate uploads.
+    content_hash: str | None = None
     status: DocumentStatus = DocumentStatus.PROCESSING
     chunk_count: int = 0
     error_message: str | None = None
-    created_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_date: datetime = Field(default_factory=lambda: datetime.now(UTC))

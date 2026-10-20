@@ -40,6 +40,8 @@ class SourceReferenceResponse(BaseModel):
     chunk_id: str
     chunk_text: str
     score: float
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 class ChatResponse(BaseModel):

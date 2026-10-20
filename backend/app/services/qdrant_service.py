@@ -112,7 +112,7 @@ class QdrantService:
                     "created_date": chunk.created_date.isoformat(),
                 },
             )
-            for chunk, vector in zip(chunks, vectors)
+            for chunk, vector in zip(chunks, vectors, strict=False)
         ]
 
         try:
@@ -220,6 +220,7 @@ class QdrantService:
                             "filename": payload.get("filename", "unknown"),
                             "chunk_count": 0,
                             "created_date": payload.get("created_date"),
+                            "content_hash": (payload.get("metadata") or {}).get("content_hash"),
                         },
                     )
                     entry["chunk_count"] += 1

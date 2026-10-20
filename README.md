@@ -193,6 +193,22 @@ Tests cover the upload API, chat API, chunking service, and embedding service, u
 
 ---
 
+### Measuring retrieval quality
+
+`backend/eval/` holds a retrieval test set (`questions.json`) and a script that measures how often the right
+chunk is retrieved, so chunking/reranking/threshold changes are decided by numbers:
+
+```bash
+cd backend
+# put copies of your documents in eval/corpus/ (git-ignored), then:
+python -m eval.retrieval_eval --verbose
+python -m eval.retrieval_eval --configs 600:100 400:60 --modes overlap bm25 --threshold 0.45
+```
+
+It only makes embedding calls (no chat), caches them in `eval/.cache/`, and never writes to Qdrant.
+
+---
+
 ## 10. API documentation
 
 Base URL: `http://localhost:8000`

@@ -19,6 +19,16 @@ from app.core.logging import logger
 from app.utils.file_utils import clean_text
 
 
+class NoExtractableTextError(HTTPException):
+    """The file parsed fine but contains no text layer (e.g. a scanned PDF)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No extractable text found in document",
+        )
+
+
 class DocumentService:
     """Extracts clean plain text from supported document formats."""
 
@@ -48,11 +58,18 @@ class DocumentService:
 
         text = clean_text(raw_text)
         if not text:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="No extractable text found in document",
-            )
+            raise NoExtractableTextError()
         return text
+
+    @staticmethod
+    def render_pdf_pages(file_path: Path, max_pages: int, dpi: int = 150) -> tuple[list[bytes], int]:
+        """Render the first `max_pages` pages as PNG images. Returns (images, total_page_count)."""
+        images: list[bytes] = []
+        with fitz.open(file_path) as pdf:
+            total = pdf.page_count
+            for page in pdf.pages(0, min(max_pages, total)):
+                images.append(page.get_pixmap(dpi=dpi).tobytes("png"))
+        return images, total
 
     @staticmethod
     def _extract_pdf(file_path: Path) -> str:
@@ -99,7 +116,7 @@ class DocumentService:
         header, data_rows = rows[0], rows[1:]
         lines = []
         for row in data_rows:
-            paired = [f"{h.strip()}: {v.strip()}" for h, v in zip(header, row) if v.strip()]
+            paired = [f"{h.strip()}: {v.strip()}" for h, v in zip(header, row, strict=False) if v.strip()]
             if paired:
                 lines.append(", ".join(paired))
         return "\n".join(lines)

@@ -106,7 +106,7 @@ async def test_follow_up_answers_are_not_served_from_cache(rag):
 
 @pytest.mark.asyncio
 async def test_stream_answer_yields_tokens_then_done(rag):
-    async def fake_stream(system_prompt, user_prompt):
+    async def fake_stream(system_prompt, user_prompt, history=None):
         for token in ["Works ", "at ", "Katalyst."]:
             yield token
 

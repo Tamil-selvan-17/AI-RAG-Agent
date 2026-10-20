@@ -196,10 +196,10 @@ class GeminiService:
         return values
 
     @provider_retry()
-    async def _embed_batch_request(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch_request(self, texts: list[str], task_type: str) -> list[list[float]]:
         data = await self._post_json(
             f"/models/{self.embed_model}:batchEmbedContents",
-            {"requests": [self._embed_request(t, "RETRIEVAL_DOCUMENT") for t in texts]},
+            {"requests": [self._embed_request(t, task_type) for t in texts]},
             "batch embedding request",
         )
         embeddings = data.get("embeddings") or []
@@ -211,12 +211,16 @@ class GeminiService:
             )
         return vectors
 
-    async def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed document chunks, up to 100 per request (document task type)."""
+    async def generate_embeddings_batch(
+        self, texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT"
+    ) -> list[list[float]]:
+        """Embed many texts, up to 100 per request (document task type by default)."""
         self._require_api_key()
         vectors: list[list[float]] = []
         for i in range(0, len(texts), _EMBED_BATCH_SIZE):
-            vectors.extend(await self._embed_batch_request(texts[i : i + _EMBED_BATCH_SIZE]))
+            vectors.extend(
+                await self._embed_batch_request(texts[i : i + _EMBED_BATCH_SIZE], task_type)
+            )
         return vectors
 
     async def stream_chat_response(
@@ -224,6 +228,7 @@ class GeminiService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        history: list[tuple[str, str]] | None = None,
     ):
         """Yield answer tokens one at a time as Gemini generates them.
 
@@ -238,9 +243,14 @@ class GeminiService:
         self._require_api_key()
 
         url = f"/models/{self.chat_model}:streamGenerateContent"
+        contents = []
+        for question, answer in history or []:
+            contents.append({"role": "user", "parts": [{"text": question}]})
+            contents.append({"role": "model", "parts": [{"text": answer}]})
+        contents.append({"role": "user", "parts": [{"text": user_prompt}]})
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "contents": contents,
             "generationConfig": {"temperature": temperature},
         }
 
@@ -284,6 +294,7 @@ class GeminiService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        history: list[tuple[str, str]] | None = None,
     ) -> str:
         """Generate a complete chat response by collecting the full token stream.
 
@@ -291,7 +302,7 @@ class GeminiService:
         returned to the caller until the whole answer is collected.
         """
         content_parts: list[str] = []
-        async for token in self.stream_chat_response(system_prompt, user_prompt, temperature):
+        async for token in self.stream_chat_response(system_prompt, user_prompt, temperature, history):
             content_parts.append(token)
 
         content = "".join(content_parts).strip()

@@ -90,6 +90,6 @@ async def test_correct_mime_type_passed_for_each_image_extension(tmp_path):
 
     for filename, expected_mime in cases:
         llm_mock.describe_image.reset_mock()
-        await rag.ingest_document(filename, b"fakebytes")
+        await rag.ingest_document(filename, f"fakebytes-{filename}".encode())
         actual_mime = llm_mock.describe_image.call_args[0][1]
         assert actual_mime == expected_mime, f"{filename} expected {expected_mime}, got {actual_mime}"

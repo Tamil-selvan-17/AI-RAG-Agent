@@ -15,7 +15,9 @@ separate paid reranking API/model -- a lightweight, dependency-free approach
 suitable for a small self-hosted or free-tier deployment.
 """
 
+import math
 import re
+from collections import Counter
 
 _STOPWORDS = {
     "the", "is", "are", "was", "were", "does", "do", "did", "have", "has", "had",
@@ -48,12 +50,50 @@ def _lexical_overlap_score(question_words: set[str], chunk_text: str) -> float:
     return len(overlap) / len(question_words)
 
 
+def _tokens(text: str) -> list[str]:
+    return [w for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS and len(w) > 1]
+
+
+def _bm25_scores(question: str, texts: list[str], k1: float = 1.5, b: float = 0.75) -> list[float]:
+    """BM25 score of each text for the question, normalized to 0-1 (best = 1).
+
+    IDF is computed over the candidate pool itself. That is an approximation of
+    corpus-wide IDF, but it is exactly the set being reordered, and it needs no
+    extra index: terms that appear in every candidate carry little weight, rare
+    ones (names, product codes, numbers) carry a lot.
+    """
+    query_terms = set(_tokens(question))
+    docs = [_tokens(t) for t in texts]
+    if not query_terms or not docs:
+        return [0.0] * len(texts)
+
+    n = len(docs)
+    avg_len = sum(len(d) for d in docs) / n or 1.0
+    doc_freq = Counter(term for d in docs for term in set(d) if term in query_terms)
+
+    scores = []
+    for d in docs:
+        tf = Counter(d)
+        score = 0.0
+        for term in query_terms:
+            if not tf[term]:
+                continue
+            idf = math.log(1 + (n - doc_freq[term] + 0.5) / (doc_freq[term] + 0.5))
+            norm = tf[term] * (k1 + 1) / (tf[term] + k1 * (1 - b + b * len(d) / avg_len))
+            score += idf * norm
+        scores.append(score)
+
+    best = max(scores)
+    return [s / best for s in scores] if best > 0 else scores
+
+
 def rerank(
     question: str,
     results: list[dict],
     top_k: int,
     vector_weight: float = 0.7,
     lexical_weight: float = 0.3,
+    mode: str = "overlap",
 ) -> list[dict]:
     """Rerank Qdrant search results using a blend of vector and lexical scores.
 
@@ -63,6 +103,8 @@ def rerank(
             "score" (vector similarity, 0-1) and "chunk_text"
         top_k: how many results to return after reranking
         vector_weight / lexical_weight: blend weights (should sum to ~1.0)
+        mode: lexical signal -- "overlap" (fraction of question words present),
+            "bm25" (term-frequency/rarity weighted), or "none" (vector order only)
 
     Returns:
         Up to top_k results, reordered by blended score. Each result's original
@@ -73,12 +115,20 @@ def rerank(
     if not results:
         return []
 
-    question_words = _significant_words(question)
+    if mode == "none":
+        return sorted(results, key=lambda r: r.get("score", 0.0), reverse=True)[:top_k]
+
+    if mode == "bm25":
+        lexical_scores = _bm25_scores(question, [r.get("chunk_text", "") for r in results])
+    else:
+        question_words = _significant_words(question)
+        lexical_scores = [
+            _lexical_overlap_score(question_words, r.get("chunk_text", "")) for r in results
+        ]
 
     scored = []
-    for r in results:
+    for r, lexical_score in zip(results, lexical_scores, strict=False):
         vector_score = r.get("score", 0.0)
-        lexical_score = _lexical_overlap_score(question_words, r.get("chunk_text", ""))
         blended = (vector_weight * vector_score) + (lexical_weight * lexical_score)
         scored.append((blended, r))
 

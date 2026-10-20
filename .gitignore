@@ -36,3 +36,7 @@ node_modules/
 # Environment files (secrets) -- commit backend/.env.example instead
 .env
 !.env.example
+
+# Retrieval eval: personal documents and embedding cache
+backend/eval/corpus/
+backend/eval/.cache/

@@ -7,7 +7,6 @@ A single cached Settings instance is shared across the application via get_setti
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,6 +28,9 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_chat_model: str = "qwen2.5:7b"
     ollama_embed_model: str = "bge-m3"
+    # Vision-capable model for image uploads and scanned PDFs (e.g. "llava",
+    # "qwen2.5vl"). Empty = use OLLAMA_CHAT_MODEL, which only works if it supports images.
+    ollama_vision_model: str = ""
     ollama_timeout_seconds: int = 180
 
     # ---- Gemini (used when ai_provider = "gemini") ----
@@ -66,12 +68,19 @@ class Settings(BaseSettings):
     redis_conversation_ttl_seconds: int = 604800
 
     # ---- Chunking ----
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
+    # In tokens (~4 chars each). 600/100 matched 1000/200's retrieval accuracy on
+    # the eval set (eval/retrieval_eval.py) while sending ~34% less text to the LLM.
+    chunk_size: int = 600
+    chunk_overlap: int = 100
 
     # ---- RAG ----
     rag_top_k: int = 5
-    rag_score_threshold: float = 0.3
+    # Minimum similarity (0-1) for a chunk to count as a match. Scores are on a
+    # different scale per embedding model, so leave this unset to use the
+    # provider default (see effective_score_threshold), or tune it with the eval.
+    rag_score_threshold: float | None = None
+    # Lexical signal blended into vector scores when reranking: "overlap", "bm25" or "none".
+    rag_rerank_mode: str = "overlap"
 
     # Rewrite follow-up questions ("what about his education?") into standalone
     # questions using the conversation history before searching Qdrant. Costs one
@@ -79,6 +88,9 @@ class Settings(BaseSettings):
     rag_query_rewrite: bool = True
     # How many uploads may be parsed/embedded at the same time (others wait their turn).
     max_concurrent_ingestions: int = 2
+    # Scanned PDFs (no text layer) are read page by page with the vision model.
+    # Each page is one AI request, so this caps the cost of a single upload.
+    max_ocr_pages: int = 10
 
     # ---- Rate limiting ----
     # Max chat questions per client IP per minute (0 = unlimited). Protects the
@@ -102,7 +114,7 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
 
     @property
-    def cors_origin_list(self) -> List[str]:
+    def cors_origin_list(self) -> list[str]:
         if self.cors_origins.strip() == "*":
             return ["*"]
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
@@ -113,6 +125,18 @@ class Settings(BaseSettings):
         if self.ai_provider == "gemini":
             return self.gemini_embed_dimensions
         return self.qdrant_vector_size
+
+    @property
+    def effective_score_threshold(self) -> float:
+        """RAG_SCORE_THRESHOLD if set, else a default measured for the active embedding model.
+
+        gemini-embedding-001: correct chunks scored >= 0.55 on the eval set while
+        off-topic questions topped out around 0.48-0.51. bge-m3 (Ollama) scores
+        lower overall; 0.3 is what worked in earlier real testing.
+        """
+        if self.rag_score_threshold is not None:
+            return self.rag_score_threshold
+        return 0.5 if self.ai_provider == "gemini" else 0.3
 
     @property
     def upload_dir_path(self) -> Path:

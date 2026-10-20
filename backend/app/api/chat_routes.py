@@ -44,13 +44,7 @@ async def chat(request: ChatRequest, rag: RagService = Depends(get_rag_service))
         question=request.question,
         answer=answer,
         sources=[
-            SourceReferenceResponse(
-                document_id=s.document_id,
-                filename=s.filename,
-                chunk_id=s.chunk_id,
-                chunk_text=s.chunk_text,
-                score=s.score,
-            )
+            SourceReferenceResponse(**s.model_dump())
             for s in sources
         ],
     )
@@ -116,13 +110,7 @@ async def get_chat_history(
                 question=t.question,
                 answer=t.answer,
                 sources=[
-                    SourceReferenceResponse(
-                        document_id=s.document_id,
-                        filename=s.filename,
-                        chunk_id=s.chunk_id,
-                        chunk_text=s.chunk_text,
-                        score=s.score,
-                    )
+                    SourceReferenceResponse(**s.model_dump())
                     for s in t.sources
                 ],
                 timestamp=t.timestamp,

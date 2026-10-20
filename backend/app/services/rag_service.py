@@ -11,6 +11,7 @@ Memory:     persist each turn to Redis; use recent turns as extra context
 """
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ from app.core.security import (
 from app.models.chat import ChatTurn, SourceReference
 from app.models.document import Document, DocumentStatus
 from app.services.chunking_service import ChunkingService
-from app.services.document_service import DocumentService
+from app.services.document_service import DocumentService, NoExtractableTextError
 from app.services.embedding_service import EmbeddingService
 from app.services.qdrant_service import QdrantService
 from app.services.redis_service import RedisService
@@ -108,6 +109,10 @@ def _build_system_prompt(language_name: str | None = None) -> str:
     )
 
 
+# Earlier answers sent back to the model as conversation history are trimmed to
+# this length: enough to resolve "he"/"that project", without resending long answers.
+_HISTORY_ANSWER_MAX_CHARS = 1500
+
 _NO_MATCH_ANSWER = (
     "I couldn't find any relevant information in the uploaded documents "
     "to answer that question. Please try rephrasing, or upload a document "
@@ -137,6 +142,8 @@ class _PreparedAnswer:
     from_cache: bool = False
     system_prompt: str = ""
     user_prompt: str = ""
+    # Previous (question, answer) turns, sent to the LLM as real chat messages.
+    history: list[tuple[str, str]] = field(default_factory=list)
 
 
 class RagService:
@@ -178,14 +185,32 @@ class RagService:
         """
         safe_name = sanitize_filename(original_filename)
         extension = validate_extension(safe_name)
-        document_id = generate_document_id()
+        content_hash = hashlib.sha256(contents).hexdigest()
 
+        duplicate = next(
+            (
+                d for d in await self.list_documents()
+                if d.content_hash == content_hash and d.status != DocumentStatus.FAILED
+            ),
+            None,
+        )
+        if duplicate:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"This file is already uploaded as '{duplicate.filename}'. "
+                    "Delete that document first if you want to upload it again."
+                ),
+            )
+
+        document_id = generate_document_id()
         document = Document(
             document_id=document_id,
             filename=safe_name,
             file_extension=extension,
             file_size_bytes=len(contents),
             status=DocumentStatus.PROCESSING,
+            content_hash=content_hash,
         )
         # Stored under a per-document name so two uploads called "resume.pdf"
         # never overwrite each other, and deleting one never removes the other's file.
@@ -252,13 +277,23 @@ class RagService:
         else:
             # Parsing a large PDF is CPU-bound; a worker thread keeps every other
             # request responsive meanwhile.
-            text = await asyncio.to_thread(self.document_service.extract_text, file_path, extension)
+            try:
+                text = await asyncio.to_thread(self.document_service.extract_text, file_path, extension)
+            except NoExtractableTextError:
+                if extension != ".pdf":
+                    raise
+                text = await self._ocr_scanned_pdf(document, file_path)
 
         chunks = self.chunking_service.chunk_document(
             text=text,
             document_id=document.document_id,
             filename=document.filename,
-            extra_metadata={"source_path": str(file_path), "file_extension": extension},
+            extra_metadata={
+                "source_path": str(file_path),
+                "file_extension": extension,
+                # Kept in Qdrant so duplicate detection survives a registry reset.
+                "content_hash": document.content_hash,
+            },
         )
         if not chunks:
             raise HTTPException(
@@ -287,6 +322,33 @@ class RagService:
             f"Ingested document '{document.filename}' ({document.document_id}) with {len(chunks)} chunks"
         )
         return document
+
+    async def _ocr_scanned_pdf(self, document: Document, file_path: Path) -> str:
+        """Read a PDF without a text layer (a scan) page by page with the vision model."""
+        max_pages = self.settings.max_ocr_pages
+        images, total_pages = await asyncio.to_thread(
+            self.document_service.render_pdf_pages, file_path, max_pages
+        )
+        if not images:
+            raise NoExtractableTextError()
+        logger.info(
+            f"'{document.filename}' has no text layer; reading {len(images)} of {total_pages} "
+            "page(s) with the vision model"
+        )
+        if total_pages > len(images):
+            logger.warning(
+                f"Only the first {len(images)} pages of '{document.filename}' will be searchable "
+                f"(MAX_OCR_PAGES={max_pages})"
+            )
+
+        pages: list[str] = []
+        for number, image in enumerate(images, start=1):
+            description = clean_text(await self.llm_service.describe_image(image, "image/png"))
+            if description:
+                pages.append(f"[Page {number}]\n{description}")
+        if not pages:
+            raise NoExtractableTextError()
+        return "\n\n".join(pages)
 
     async def recover_interrupted_ingestions(self) -> int:
         """Mark documents left PROCESSING by a previous process (restart/crash) as FAILED.
@@ -340,6 +402,7 @@ class RagService:
                 status=DocumentStatus.READY,
                 chunk_count=entry["chunk_count"],
                 created_date=created_date,
+                content_hash=entry.get("content_hash"),
             )
             await self.redis_service.save_document(document)
             restored.append(document)
@@ -451,7 +514,8 @@ class RagService:
                 conversation_id, language_name, has_history=False, ready_answer=smalltalk_reply
             )
 
-        history = await self.redis_service.get_recent_context(conversation_id, max_turns=3)
+        turns = await self.redis_service.get_conversation_history(conversation_id, limit=3)
+        history = "\n\n".join(f"User: {t.question}\nAssistant: {t.answer}" for t in turns)
 
         # Only standalone questions are cached: a follow-up like "what about his
         # education?" means something different in every conversation.
@@ -481,9 +545,9 @@ class RagService:
         candidates = await self.qdrant_service.search(
             query_vector=query_vector,
             top_k=min(k * 4, 40),
-            score_threshold=self.settings.rag_score_threshold,
+            score_threshold=self.settings.effective_score_threshold,
         )
-        results = rerank(search_query, candidates, top_k=k)
+        results = rerank(search_query, candidates, top_k=k, mode=self.settings.rag_rerank_mode)
 
         sources = self._deduplicate_sources(
             [
@@ -493,6 +557,8 @@ class RagService:
                     chunk_id=r["chunk_id"],
                     chunk_text=r["chunk_text"],
                     score=r["score"],
+                    page_start=(r.get("metadata") or {}).get("page_start"),
+                    page_end=(r.get("metadata") or {}).get("page_end"),
                 )
                 for r in results
             ]
@@ -506,9 +572,10 @@ class RagService:
             return prepared
 
         prepared.system_prompt = _build_system_prompt(language_name)
-        prepared.user_prompt = self._build_user_prompt(
-            question, self._build_context(sources), history
-        )
+        prepared.user_prompt = self._build_user_prompt(question, self._build_context(sources))
+        prepared.history = [
+            (t.question, t.answer[:_HISTORY_ANSWER_MAX_CHARS]) for t in turns if t.answer
+        ]
         return prepared
 
     async def _record_answer(self, prepared: _PreparedAnswer, question: str, answer: str) -> None:
@@ -543,6 +610,7 @@ class RagService:
             answer = await self.llm_service.generate_chat_response(
                 system_prompt=prepared.system_prompt,
                 user_prompt=prepared.user_prompt,
+                history=prepared.history,
             )
 
         await self._record_answer(prepared, question, answer)
@@ -581,6 +649,7 @@ class RagService:
                 async for token in self.llm_service.stream_chat_response(
                     system_prompt=prepared.system_prompt,
                     user_prompt=prepared.user_prompt,
+                    history=prepared.history,
                 ):
                     answer_parts.append(token)
                     yield {"type": "token", "content": token}
@@ -631,14 +700,15 @@ class RagService:
     def _build_context(sources: list[SourceReference]) -> str:
         blocks = []
         for i, s in enumerate(sources, start=1):
-            blocks.append(f"[Source {i} - {s.filename}]\n{s.chunk_text}")
+            page = ""
+            if s.page_start:
+                same_page = s.page_end in (None, s.page_start)
+                page = f", page {s.page_start}" if same_page else f", pages {s.page_start}-{s.page_end}"
+            blocks.append(f"[Source {i} - {s.filename}{page}]\n{s.chunk_text}")
         return "\n\n".join(blocks)
 
     @staticmethod
-    def _build_user_prompt(question: str, context: str, recent_history: str) -> str:
-        parts = []
-        if recent_history:
-            parts.append(f"Previous conversation:\n{recent_history}")
-        parts.append(f"Context:\n{context}")
-        parts.append(f"Question: {question}")
-        return "\n\n".join(parts)
+    def _build_user_prompt(question: str, context: str) -> str:
+        # Conversation history is sent separately as real chat turns (see
+        # _PreparedAnswer.history), so the prompt holds only this turn's context.
+        return f"Context:\n{context}\n\nQuestion: {question}"
