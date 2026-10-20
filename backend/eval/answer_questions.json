@@ -1,0 +1,17 @@
+{
+  "description": "Answer-level test set. An answer passes when, for every group in `require`, it contains at least one of that group's strings (case/whitespace-insensitive). `kind` is informational: multi-step questions need facts from several places or a calculation; simple ones should not get worse in agent mode.",
+  "questions": [
+    {"id": "compare-npms-nvms", "kind": "multi-step", "question": "Compare the nPMS and nVMS projects: which database and which .NET version does each one use?", "require": [["MongoDB"], ["SQL Server"], [".NET 10"], [".NET 6"]]},
+    {"id": "mongo-and-net10", "kind": "multi-step", "question": "Which project uses both MongoDB and .NET 10?", "require": [["nPMS"]]},
+    {"id": "junior-duration", "kind": "multi-step", "question": "How long was he a Junior Software Engineer?", "require": [["1 year 5 months", "1 year and 5 months", "17 months", "one year and five months", "1 year, 5 months", "1 year 6 months", "1 year and 6 months", "18 months"]]},
+    {"id": "grad-to-associate", "kind": "multi-step", "question": "How many years after graduating did he become an Associate Software Engineer?", "require": [["3 years", "three years", "3+ years", "about 3", "3.5", "3.7", "3 to 4", "3-4"]]},
+    {"id": "signalr-where", "kind": "multi-step", "question": "List every project that uses SignalR and say what SignalR was used for.", "require": [["nEDIT"], ["sync", "real-time", "real time", "collaboration"]]},
+    {"id": "jwt-projects", "kind": "multi-step", "question": "Which of his projects used JWT authentication?", "require": [["nPMS"], ["nVMS"]]},
+    {"id": "all-projects", "kind": "multi-step", "question": "Summarize all of his projects in one sentence each.", "require": [["nPMS"], ["nVMS"], ["nEDIT"], ["Sesame"], ["RAG"]]},
+    {"id": "image-two-parts", "kind": "multi-step", "question": "What does the Murugan image show, and what text is in its watermark?", "require": [["Murugan"], ["WALLPAPER.COM"]]},
+    {"id": "cgpa", "kind": "simple", "question": "What was his CGPA?", "require": [["7.45"]]},
+    {"id": "employer", "kind": "simple", "question": "Which company does he work for?", "require": [["Nova Techset"]]},
+    {"id": "freelancers", "kind": "simple", "question": "How many freelancers does the vendor management system manage?", "require": [["300"]]},
+    {"id": "salary", "kind": "unanswerable", "question": "What is his current salary?", "require": [["not", "no information", "no mention", "doesn't", "does not", "couldn't", "unable", "isn't"]]}
+  ]
+}

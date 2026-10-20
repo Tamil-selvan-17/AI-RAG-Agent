@@ -436,7 +436,11 @@ async function streamAnswer(question, wrapEl, signal) {
 
         const event = JSON.parse(line.slice('data: '.length));
 
-        if (event.type === 'token') {
+        if (event.type === 'status') {
+          // Agent mode: show what it is doing while it searches, before the answer.
+          const loading = wrapEl.querySelector('.msg-answer.loading');
+          if (loading) loading.textContent = `${event.content}…`;
+        } else if (event.type === 'token') {
           if (!answerEl) {
             wrapEl.innerHTML = '<div class="msg-answer streaming"></div>';
             answerEl = wrapEl.querySelector('.msg-answer');
@@ -445,7 +449,7 @@ async function streamAnswer(question, wrapEl, signal) {
           scheduleRender();
         } else if (event.type === 'done') {
           setConversation(event.conversation_id);
-          renderAnswerContent(wrapEl, answerText, event.sources);
+          renderAnswerContent(wrapEl, answerText, event.sources, { agentSteps: event.agent_steps });
         } else if (event.type === 'error') {
           renderAnswerContent(wrapEl, `Something went wrong: ${event.detail}`, []);
         }
@@ -532,7 +536,13 @@ function formatPages(source) {
   return ` <span class="source-page">· ${range}</span>`;
 }
 
-function renderAnswerContent(wrapEl, answer, sources, { stopped = false } = {}) {
+function agentNote(steps) {
+  if (!steps || steps.length === 0) return '';
+  const items = steps.map(step => escapeHtml(step.replace(/^Searching: /, '“') + (step.startsWith('Searching: ') ? '”' : '')));
+  return `<p class="answer-note agent-note" title="Agent mode looked these up before answering">Looked up: ${items.join(' · ')}</p>`;
+}
+
+function renderAnswerContent(wrapEl, answer, sources, { stopped = false, agentSteps = [] } = {}) {
   let sourcesHtml = '';
   const hasSources = sources && sources.length > 0;
   if (hasSources) {
@@ -548,7 +558,7 @@ function renderAnswerContent(wrapEl, answer, sources, { stopped = false } = {}) 
         ${sources.map(s => `
           <div class="source-card">
             <div class="source-card-top">
-              <span class="source-filename">${escapeHtml(s.filename)}${formatPages(s)}</span>
+              <span class="source-filename">${escapeHtml(s.filename)}${formatPages(s)}${s.section ? ` <span class="source-page">· ${escapeHtml(s.section)}</span>` : ''}</span>
               <span class="source-score">match ${(s.score * 100).toFixed(0)}%</span>
             </div>
             <p class="source-excerpt">${escapeHtml(s.chunk_text)}</p>
@@ -560,6 +570,7 @@ function renderAnswerContent(wrapEl, answer, sources, { stopped = false } = {}) 
   wrapEl.innerHTML = `
     <div class="msg-answer${hasSources ? ' has-sources' : ''}">${renderMarkdown(answer)}</div>
     ${stopped ? '<p class="answer-note">Stopped</p>' : ''}
+    ${agentNote(agentSteps)}
     ${sourcesHtml}
   `;
 

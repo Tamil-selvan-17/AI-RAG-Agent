@@ -81,6 +81,20 @@ class Settings(BaseSettings):
     rag_score_threshold: float | None = None
     # Lexical signal blended into vector scores when reranking: "overlap", "bm25" or "none".
     rag_rerank_mode: str = "overlap"
+    # Embed each chunk with a "Document: <file> / Section: <heading>" header (see
+    # chunking_service.contextual_text). Applies to documents uploaded after the change.
+    rag_contextual_headers: bool = False
+
+    # ---- Agent mode (see services/agent_service.py) ----
+    # off      = always the one-search pipeline (1 LLM call per question)
+    # fallback = pipeline, but switch to the tool-using agent when the first search
+    #            looks weak or the question is multi-part (compare / both / all ...)
+    # always   = agent for every question (2-3 LLM calls each; heavy on free quotas)
+    agent_mode: str = "fallback"
+    # Max LLM calls the agent may make for one question; the last one must answer.
+    agent_max_steps: int = 3
+    # In fallback mode, a best vector score below this counts as a weak first search.
+    agent_fallback_score: float = 0.6
 
     # Rewrite follow-up questions ("what about his education?") into standalone
     # questions using the conversation history before searching Qdrant. Costs one

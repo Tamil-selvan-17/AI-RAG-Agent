@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import get_settings  # noqa: E402
 from app.core.tls import configure_tls  # noqa: E402
-from app.services.chunking_service import ChunkingService  # noqa: E402
+from app.services.chunking_service import ChunkingService, contextual_text  # noqa: E402
 from app.services.document_service import DocumentService  # noqa: E402
 from app.services.rerank_service import rerank  # noqa: E402
 
@@ -41,6 +41,9 @@ EVAL_DIR = Path(__file__).resolve().parent
 CACHE_FILE = EVAL_DIR / ".cache" / "embeddings.json"
 DEFAULT_CONFIGS = ["1000:200", "600:100", "400:60", "250:40"]
 DEFAULT_MODES = ["none", "overlap", "bm25"]
+# off = embed the chunk text only; embed = embed "Document/Section" header + text (what
+# the app does with RAG_CONTEXTUAL_HEADERS=true); embed+lexical = header also used by rerank.
+HEADER_MODES = ["off", "embed", "embed+lexical"]
 
 
 # --------------------------------------------------------------------------- #
@@ -147,14 +150,25 @@ async def evaluate(
     mode: str,
     top_k: int,
     threshold: float,
+    header_mode: str = "off",
 ) -> ConfigResult:
     chunker = ChunkingService(chunk_size_tokens=size, chunk_overlap_tokens=overlap)
     chunks: list[dict] = []
     for name, text in documents.items():
-        for i, piece in enumerate(chunker.split_text(text)):
-            chunks.append({"filename": name, "chunk_id": f"{name}#{i}", "chunk_text": piece})
+        for chunk in chunker.chunk_document(text, "eval", name):
+            with_header = contextual_text(name, chunk.metadata.get("section"), chunk.chunk_text)
+            chunks.append(
+                {
+                    "filename": name,
+                    "chunk_id": f"{name}#{chunk.chunk_index}",
+                    # What the reranker sees; evidence is always checked against the original text.
+                    "chunk_text": with_header if header_mode == "embed+lexical" else chunk.chunk_text,
+                    "original_text": chunk.chunk_text,
+                    "embed_text": chunk.chunk_text if header_mode == "off" else with_header,
+                }
+            )
 
-    chunk_vectors = await embedder.embed([c["chunk_text"] for c in chunks], "RETRIEVAL_DOCUMENT")
+    chunk_vectors = await embedder.embed([c["embed_text"] for c in chunks], "RETRIEVAL_DOCUMENT")
     question_vectors = await embedder.embed([q["question"] for q in questions], "RETRIEVAL_QUERY")
 
     ranks: list[int | None] = []
@@ -164,9 +178,7 @@ async def evaluate(
     misses: list[str] = []
 
     for q, q_vec in zip(questions, question_vectors, strict=False):
-        scored = [
-            {**c, "score": cosine(q_vec, v)} for c, v in zip(chunks, chunk_vectors, strict=False)
-        ]
+        scored = [{**c, "score": cosine(q_vec, v)} for c, v in zip(chunks, chunk_vectors, strict=False)]
         scored = [c for c in scored if c["score"] >= threshold]
         scored.sort(key=lambda c: c["score"], reverse=True)
         candidates = scored[: min(top_k * 4, 40)]
@@ -178,9 +190,9 @@ async def evaluate(
                 unanswerable_matched += 1
             continue
 
-        context_chars.append(sum(len(r["chunk_text"]) for r in results))
+        context_chars.append(sum(len(r["original_text"]) for r in results))
         rank = next(
-            (i for i, r in enumerate(results, start=1) if contains_evidence(r["chunk_text"], q["evidence"])),
+            (i for i, r in enumerate(results, start=1) if contains_evidence(r["original_text"], q["evidence"])),
             None,
         )
         ranks.append(rank)
@@ -190,7 +202,7 @@ async def evaluate(
 
     answerable = len(ranks) or 1
     return ConfigResult(
-        label=f"{size}:{overlap} {mode}",
+        label=f"{size}:{overlap} {mode} h={header_mode}",
         chunk_count=len(chunks),
         hit1=sum(1 for r in ranks if r == 1) / answerable,
         hit3=sum(1 for r in ranks if r and r <= 3) / answerable,
@@ -220,6 +232,13 @@ async def main() -> None:
     parser.add_argument("--questions", type=Path, default=EVAL_DIR / "questions.json")
     parser.add_argument("--configs", nargs="+", default=DEFAULT_CONFIGS, help="chunk_size:overlap (tokens)")
     parser.add_argument("--modes", nargs="+", default=DEFAULT_MODES, choices=DEFAULT_MODES)
+    parser.add_argument(
+        "--headers",
+        nargs="+",
+        default=["off", "embed"],
+        choices=HEADER_MODES,
+        help="contextual chunk header modes to compare",
+    )
     parser.add_argument("--top-k", type=int, default=settings.rag_top_k)
     parser.add_argument("--threshold", type=float, default=settings.effective_score_threshold)
     parser.add_argument("--verbose", action="store_true", help="print the questions each config missed at rank 1")
@@ -232,10 +251,12 @@ async def main() -> None:
     check_evidence_exists(documents, questions)
 
     embedder = CachedEmbedder()
-    print(f"Corpus: {', '.join(documents)} | {len(questions)} questions | "
-          f"top_k={args.top_k} threshold={args.threshold} | {embedder.model_key}\n")
+    print(
+        f"Corpus: {', '.join(documents)} | {len(questions)} questions | "
+        f"top_k={args.top_k} threshold={args.threshold} | {embedder.model_key}\n"
+    )
     header = (
-        f"{'config':<22}{'chunks':>7}{'hit@1':>8}{'hit@3':>8}{'hit@5':>8}"
+        f"{'config':<38}{'chunks':>7}{'hit@1':>8}{'hit@3':>8}{'hit@5':>8}"
         f"{'MRR':>7}{'ctx chars':>11}{'no-answer matched':>19}"
     )
     print(header)
@@ -245,14 +266,17 @@ async def main() -> None:
         for config in args.configs:
             size, overlap = (int(x) for x in config.split(":"))
             for mode in args.modes:
-                r = await evaluate(embedder, documents, questions, size, overlap, mode, args.top_k, args.threshold)
-                print(
-                    f"{r.label:<22}{r.chunk_count:>7}{r.hit1:>8.0%}{r.hit3:>8.0%}{r.hit5:>8.0%}"
-                    f"{r.mrr:>7.2f}{r.avg_context_chars:>11.0f}{r.unanswerable_matched:>12}/{r.unanswerable_total}"
-                )
-                if args.verbose and r.misses:
-                    for miss in r.misses:
-                        print(f"    miss  {miss}")
+                for header_mode in args.headers:
+                    r = await evaluate(
+                        embedder, documents, questions, size, overlap, mode, args.top_k, args.threshold, header_mode
+                    )
+                    print(
+                        f"{r.label:<38}{r.chunk_count:>7}{r.hit1:>8.0%}{r.hit3:>8.0%}{r.hit5:>8.0%}"
+                        f"{r.mrr:>7.2f}{r.avg_context_chars:>11.0f}{r.unanswerable_matched:>12}/{r.unanswerable_total}"
+                    )
+                    if args.verbose and r.misses:
+                        for miss in r.misses:
+                            print(f"    miss  {miss}")
     finally:
         await embedder.aclose()
 

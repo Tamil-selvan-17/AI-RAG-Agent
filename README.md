@@ -216,6 +216,25 @@ python -m eval.retrieval_eval --configs 600:100 400:60 --modes overlap bm25 --th
 
 It only makes embedding calls (no chat), caches them in `eval/.cache/`, and never writes to Qdrant.
 
+`eval/answer_eval.py` grades whole **answers** (required facts per question in `answer_questions.json`) for
+the normal pipeline vs agent mode vs the default fallback, using an in-memory Qdrant:
+
+```bash
+python -m eval.answer_eval --show-answers
+```
+
+It makes real chat calls (~1 per question for the pipeline, ~1-2 for the agent); answers are cached in
+`eval/.cache/answers.json`, so a run stopped by the daily quota resumes where it left off.
+
+### Agent mode
+
+`AGENT_MODE=fallback` (default) answers most questions with the normal one-search pipeline, and hands
+multi-part questions ("compare...", "all of his projects", "both...") or weak first searches to an agent
+that can call `search_documents`, `list_documents` and `calculate_duration` (exact date maths), capped at
+`AGENT_MAX_STEPS` AI calls. Questions with no match at all still cost zero AI calls. While the agent works,
+the chat shows what it is doing ("Searching: ...") and lists what it looked up under the answer.
+Agent mode needs Gemini (function calling); with Ollama the normal pipeline is always used.
+
 ---
 
 ## 10. API documentation

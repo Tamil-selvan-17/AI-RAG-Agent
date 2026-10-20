@@ -29,7 +29,8 @@ from app.core.security import (
 )
 from app.models.chat import ChatTurn, SourceReference
 from app.models.document import Document, DocumentStatus
-from app.services.chunking_service import ChunkingService
+from app.services.agent_service import AgentService, looks_multi_part
+from app.services.chunking_service import ChunkingService, contextual_text
 from app.services.document_service import DocumentService, NoExtractableTextError
 from app.services.embedding_service import EmbeddingService
 from app.services.qdrant_service import QdrantService
@@ -144,6 +145,10 @@ class _PreparedAnswer:
     user_prompt: str = ""
     # Previous (question, answer) turns, sent to the LLM as real chat messages.
     history: list[tuple[str, str]] = field(default_factory=list)
+    # Agent mode: why it was chosen ("" = normal pipeline) and the first search's context.
+    agent_reason: str = ""
+    context: str = ""
+    agent_steps: list[str] = field(default_factory=list)
 
 
 class RagService:
@@ -157,6 +162,7 @@ class RagService:
         qdrant_service: QdrantService | None = None,
         redis_service: RedisService | None = None,
         llm_service=None,
+        agent_service: AgentService | None = None,
     ) -> None:
         settings = get_settings()
         self.settings = settings
@@ -166,6 +172,9 @@ class RagService:
         self.qdrant_service = qdrant_service or QdrantService()
         self.redis_service = redis_service or _default_memory_backend()
         self.llm_service = llm_service or _default_llm_backend()
+        self.agent_service = agent_service or AgentService(
+            self.llm_service, self.embedding_service, self.qdrant_service, self.redis_service
+        )
         # Limits how many uploads are parsed/embedded at once, so a burst of
         # uploads doesn't flood the AI provider (or this machine's CPU).
         self._ingestion_slots = asyncio.Semaphore(settings.max_concurrent_ingestions)
@@ -302,7 +311,11 @@ class RagService:
             )
 
         await self.qdrant_service.ensure_collection()
-        vectors = await self.embedding_service.embed_batch([c.chunk_text for c in chunks])
+        if self.settings.rag_contextual_headers:
+            texts = [contextual_text(c.filename, c.metadata.get("section"), c.chunk_text) for c in chunks]
+        else:
+            texts = [c.chunk_text for c in chunks]
+        vectors = await self.embedding_service.embed_batch(texts)
         await self.qdrant_service.upsert_chunks(chunks, vectors)
 
         # The user may have deleted the document while it was still processing.
@@ -559,6 +572,7 @@ class RagService:
                     score=r["score"],
                     page_start=(r.get("metadata") or {}).get("page_start"),
                     page_end=(r.get("metadata") or {}).get("page_end"),
+                    section=(r.get("metadata") or {}).get("section"),
                 )
                 for r in results
             ]
@@ -567,16 +581,66 @@ class RagService:
         prepared = _PreparedAnswer(
             conversation_id, language_name, has_history=bool(history), sources=sources
         )
-        if not sources:
+        top_score = max((c["score"] for c in candidates), default=0.0)
+        prepared.agent_reason = self._agent_reason(question, bool(sources), top_score)
+        if not sources and not prepared.agent_reason:
             prepared.ready_answer = _NO_MATCH_ANSWER
             return prepared
 
         prepared.system_prompt = _build_system_prompt(language_name)
-        prepared.user_prompt = self._build_user_prompt(question, self._build_context(sources))
+        prepared.context = self._build_context(sources)
+        prepared.user_prompt = self._build_user_prompt(question, prepared.context)
         prepared.history = [
             (t.question, t.answer[:_HISTORY_ANSWER_MAX_CHARS]) for t in turns if t.answer
         ]
         return prepared
+
+    def _agent_reason(self, question: str, has_sources: bool, top_score: float) -> str:
+        """Why this question should go to the agent, or "" for the normal pipeline."""
+        mode = self.settings.agent_mode
+        if mode == "off" or not self.agent_service.available:
+            return ""
+        if mode == "always":
+            return "always"
+        # fallback: questions with no match at all stay on the zero-cost "not found"
+        # path -- they are usually off-topic, and the agent would only burn quota.
+        if not has_sources:
+            return ""
+        if looks_multi_part(question):
+            return "multi-part question"
+        if top_score < self.settings.agent_fallback_score:
+            return f"weak first search (best score {top_score:.2f})"
+        return ""
+
+    async def _run_agent(self, prepared: _PreparedAnswer, question: str):
+        """Yield agent status strings, then set the answer/sources on `prepared`.
+
+        If the agent fails for any reason other than a used-up quota, the normal
+        one-call pipeline answers instead, so agent mode never makes things worse.
+        """
+        try:
+            async for event in self.agent_service.run_with_events(
+                question=question,
+                system_prompt=prepared.system_prompt,
+                initial_context=prepared.context,
+                initial_sources=prepared.sources,
+                history=prepared.history,
+            ):
+                if isinstance(event, str):
+                    yield event
+                    continue
+                prepared.ready_answer = event.answer
+                prepared.sources = event.sources
+                prepared.agent_steps = event.steps
+                logger.info(
+                    f"Agent answered ({prepared.agent_reason}) with {event.llm_calls} LLM call(s); "
+                    f"tools: {event.steps or 'none'}"
+                )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS or not prepared.sources:
+                raise
+            logger.warning(f"Agent failed ({exc.detail}); answering with the normal pipeline")
+            prepared.agent_reason = ""
 
     async def _record_answer(self, prepared: _PreparedAnswer, question: str, answer: str) -> None:
         """Persist the turn to conversation memory and cache it when appropriate."""
@@ -604,6 +668,10 @@ class RagService:
     ) -> tuple[str, str, list[SourceReference]]:
         """Run retrieval + generation for a question, persist memory, return results."""
         prepared = await self._prepare_answer(question, conversation_id, top_k, response_language)
+
+        if prepared.ready_answer is None and prepared.agent_reason:
+            async for _status in self._run_agent(prepared, question):
+                pass
 
         answer = prepared.ready_answer
         if answer is None:
@@ -636,6 +704,9 @@ class RagService:
         """
         try:
             prepared = await self._prepare_answer(question, conversation_id, top_k, response_language)
+            if prepared.ready_answer is None and prepared.agent_reason:
+                async for agent_status in self._run_agent(prepared, question):
+                    yield {"type": "status", "content": agent_status}
         except HTTPException as exc:
             yield {"type": "error", "detail": exc.detail}
             return
@@ -672,6 +743,7 @@ class RagService:
             "type": "done",
             "conversation_id": prepared.conversation_id,
             "sources": [s.model_dump() for s in prepared.sources],
+            "agent_steps": prepared.agent_steps,
         }
 
     async def get_history(self, conversation_id: str) -> list[ChatTurn]:
@@ -704,7 +776,8 @@ class RagService:
             if s.page_start:
                 same_page = s.page_end in (None, s.page_start)
                 page = f", page {s.page_start}" if same_page else f", pages {s.page_start}-{s.page_end}"
-            blocks.append(f"[Source {i} - {s.filename}{page}]\n{s.chunk_text}")
+            section = f", section: {s.section}" if s.section else ""
+            blocks.append(f"[Source {i} - {s.filename}{page}{section}]\n{s.chunk_text}")
         return "\n\n".join(blocks)
 
     @staticmethod

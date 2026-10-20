@@ -16,6 +16,8 @@ class SourceReference(BaseModel):
     # PDF page range the chunk came from (None for non-PDF / older uploads).
     page_start: int | None = None
     page_end: int | None = None
+    # Section heading the chunk is under (e.g. "KEY PROJECTS > 2. nVMS"), if detected.
+    section: str | None = None
 
 
 class ChatTurn(BaseModel):

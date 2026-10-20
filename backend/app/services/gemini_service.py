@@ -370,6 +370,47 @@ class GeminiService:
             )
         return text.strip()
 
+    @provider_retry(attempts=3)
+    async def generate_with_tools(
+        self,
+        system_prompt: str,
+        contents: list[dict],
+        tools: list[dict],
+        allow_tools: bool = True,
+        temperature: float = 0.2,
+    ) -> dict:
+        """One function-calling turn. Returns the model's content: {"role": "model", "parts": [...]}.
+
+        `contents` is the running conversation in Gemini's format. Each returned part
+        is either text or a {"functionCall": {"name", "args"}} request. Callers must
+        append the returned content to `contents` unchanged before sending tool
+        results back: newer models attach a thoughtSignature to function-call parts
+        that has to be echoed back verbatim. With allow_tools=False the model is
+        forced to answer in text (used for the agent's final step).
+        """
+        self._require_api_key()
+        payload = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": contents,
+            "tools": [{"functionDeclarations": tools}],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO" if allow_tools else "NONE"}},
+            "generationConfig": {"temperature": temperature},
+        }
+        data = await self._post_json(
+            f"/models/{self.chat_model}:generateContent", payload, "function-calling request"
+        )
+        try:
+            content = data["candidates"][0]["content"]
+        except (KeyError, IndexError) as exc:
+            reason = (data.get("candidates") or [{}])[0].get("finishReason", "unknown")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Gemini returned no content (finish reason: {reason})",
+            ) from exc
+        content.setdefault("role", "model")
+        content.setdefault("parts", [])
+        return content
+
     async def check_health(self) -> bool:
         """Return True if the Gemini API is reachable and the API key is accepted."""
         if not self.api_key:

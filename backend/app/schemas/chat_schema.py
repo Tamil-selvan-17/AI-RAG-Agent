@@ -42,6 +42,7 @@ class SourceReferenceResponse(BaseModel):
     score: float
     page_start: int | None = None
     page_end: int | None = None
+    section: str | None = None
 
 
 class ChatResponse(BaseModel):

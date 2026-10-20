@@ -501,6 +501,13 @@ body {
   color: var(--clay);
 }
 
+.agent-note {
+  color: var(--teal);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+
 .msg-answer.loading {
   color: var(--ink-faint);
   font-style: italic;

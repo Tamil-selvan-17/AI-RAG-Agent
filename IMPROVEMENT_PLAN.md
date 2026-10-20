@@ -78,3 +78,19 @@ Tracks the improvement work for the AI RAG Agent. `[x]` = done, `[ ]` = pending.
 - [x] Markdown rendered live while streaming; fixed extra blank lines inside answers
 - [x] Toast messages instead of `alert()`, incl. "ready"/"failed" when background indexing finishes
 - [x] Mobile layout: documents in a slide-in drawer, no horizontal overflow at 390px
+
+## Phase 6 — Better match scores + agent mode (done)
+### Step 1: Contextual chunk headers
+- [x] Detect section headings while chunking (ALL-CAPS, markdown `#`, numbered titles, spaced-letter headings)
+- [x] Section shown to the LLM and on source cards; header embedding built behind `RAG_CONTEXTUAL_HEADERS`
+- [x] Measured: headers did not help (hit@1 88% -> 85%; avg correct-chunk score 0.635 both), so default off.
+      3072-dim embeddings also tested: same 88% / MRR 0.92 -> not worth re-indexing
+### Step 2: Agent mode (`AGENT_MODE=off | fallback | always`, default `fallback`)
+- [x] Gemini function calling with tools: `search_documents`, `list_documents`, `calculate_duration`
+- [x] Loop capped at `AGENT_MAX_STEPS` (default 3); last step must answer
+- [x] `fallback`: agent only when the first search is weak (low top score / no match) or the question is multi-part
+- [x] Streaming shows what the agent is doing ("Searching: ..."); Ollama falls back to the normal pipeline
+### Step 3: Answer-level evaluation
+- [x] `eval/answer_questions.json`: multi-step + simple questions, graded by required facts
+- [x] `eval/answer_eval.py`: pipeline vs agent vs fallback, in-memory Qdrant (never touches production), answers cached so a run interrupted by the daily quota can resume
+- [x] Results: pipeline 11/12 (1.0 calls/q), agent 12/12 (1.2), **fallback 12/12 (1.1)** -> fallback is the default
