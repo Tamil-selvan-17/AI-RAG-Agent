@@ -61,13 +61,20 @@ Tracks the improvement work for the AI RAG Agent. `[x]` = done, `[ ]` = pending.
 - [x] Conversation history sent as real chat turns (user/model messages) instead of text in the prompt
 - [ ] Re-evaluate chunking/BM25/threshold when more documents are uploaded (corpus is small today)
 
-## Phase 4 — Engineering hygiene
-- [ ] `RagService` unit tests with fake backends; CI (GitHub Actions) with pytest + ruff
-- [ ] `requirements-dev.txt`; drop unused `numpy`, `python-dotenv`
-- [ ] Dockerfile: non-root user, no `build-essential`, `HEALTHCHECK`; Qdrant + Redis in compose
-- [ ] Configurable log path, request IDs in logs
+## Phase 4 — Engineering hygiene (done)
+- [x] `RagService` unit tests with fake backends (99 tests total, ~3s, fully offline)
+- [x] CI (GitHub Actions): ruff + pytest, frontend syntax check, Docker build + liveness check
+- [x] ruff config (`backend/pyproject.toml`); codebase lint-clean
+- [x] `requirements-dev.txt`; unused `numpy`, `python-dotenv` pins and test tools out of runtime deps
+- [x] Dockerfile: non-root user, no `build-essential`, `HEALTHCHECK`; optional Qdrant + Redis via `docker-compose.infra.yml`
+- [x] Compose no longer overrides model/vector settings from `.env`
+- [x] `LOG_DIR` / `LOG_TO_FILE`; request ID on every log line and in the `X-Request-ID` response header
+- [x] `USE_SYSTEM_CERTS` for corporate networks that inspect HTTPS (OS certificate store via `truststore`)
 
-## Phase 5 — Frontend
-- [ ] Multi-file upload, Stop-generating button
-- [ ] Restore conversation after refresh (`/api/chat/history`)
-- [ ] Live markdown while streaming, toast messages instead of `alert()`, mobile layout
+## Phase 5 — Frontend (done)
+- [x] Multi-file upload (drop or pick several files; uploaded one after another)
+- [x] Stop-generating button (keeps the partial answer, marked "Stopped")
+- [x] Conversation restored after a page refresh (`/api/chat/history`)
+- [x] Markdown rendered live while streaming; fixed extra blank lines inside answers
+- [x] Toast messages instead of `alert()`, incl. "ready"/"failed" when background indexing finishes
+- [x] Mobile layout: documents in a slide-in drawer, no horizontal overflow at 390px

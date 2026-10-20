@@ -319,7 +319,10 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0; /* let the grid column shrink to the viewport on phones */
 }
+
+.label-short { display: none; }
 
 .room-header {
   display: flex;
@@ -358,6 +361,40 @@ body {
 .btn-ghost:hover {
   background: var(--surface-sunken);
   color: var(--ink);
+}
+
+.room-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Documents drawer toggle: only shown on narrow screens (see media query). */
+.library-toggle {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+  margin-right: 12px;
+}
+
+.library-toggle-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--teal-tint);
+  color: var(--teal-dark);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+
+.library-backdrop {
+  display: none;
 }
 
 .room-header-actions {
@@ -449,7 +486,19 @@ body {
   border-radius: 3px 14px 14px 14px;
   font-size: 14px;
   line-height: 1.65;
-  white-space: pre-wrap;
+  /* Content is rendered markdown (line breaks become <br>), so raw whitespace
+     must not add extra blank lines between the generated elements. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.answer-note {
+  margin: 4px 0 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--clay);
 }
 
 .msg-answer.loading {
@@ -672,6 +721,13 @@ body {
   background: var(--surface);
   max-height: 160px;
   line-height: 1.5;
+  overflow-y: hidden; /* autoGrow() turns scrolling on once the 160px cap is reached */
+}
+
+.composer textarea::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .composer textarea:focus {
@@ -696,6 +752,12 @@ body {
 }
 
 .btn-send:hover { background: var(--teal); }
+
+.btn-stop {
+  background: var(--clay);
+}
+
+.btn-stop:hover { background: #9a5518; }
 
 .btn-send:disabled {
   opacity: 0.45;
@@ -826,6 +888,68 @@ body {
   cursor: progress;
 }
 
+/* ---- Toasts ---- */
+
+.toast-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--teal);
+  border-radius: var(--radius-sm);
+  padding: 10px 10px 10px 14px;
+  font-size: 13px;
+  color: var(--ink);
+  box-shadow: 0 6px 24px rgba(28, 32, 36, 0.12);
+  animation: toast-in 0.18s ease-out;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast-success { border-left-color: #3B6E49; }
+.toast-error { border-left-color: var(--danger); }
+
+.toast.leaving {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.toast-message {
+  flex: 1;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.toast-close:hover { color: var(--ink); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
 /* ---- Scrollbars ---- */
 
 .library-list::-webkit-scrollbar,
@@ -844,17 +968,66 @@ body {
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
+    height: 100dvh;
   }
+
+  /* The library becomes a slide-in drawer opened from the header. */
   .library {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    max-height: 40vh;
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(340px, 86vw);
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: 0 0 40px rgba(28, 32, 36, 0.18);
   }
+
+  .library-open .library { transform: none; }
+
+  .library-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    background: rgba(28, 32, 36, 0.35);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+
+  .library-open .library-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .library-toggle { display: inline-flex; }
+
   .room-header {
     flex-wrap: wrap;
     gap: 10px;
-    padding: 16px;
+    padding: 12px 16px;
+  }
+
+  .room-header-actions { gap: 6px; }
+  .user-chip { display: none; }
+  .label-long { display: none; }
+  .label-short { display: inline; }
+  /* The Documents button and actions are enough on a phone; the title just crowds them. */
+  .room-title h2,
+  #conversationMeta { display: none; }
+  .composer textarea { font-size: 16px; } /* 16px stops iOS zooming into the field */
+  .btn-ghost { padding: 6px 10px; }
+  .chat-scroll { padding: 18px 16px; }
+  .lang-row { padding: 8px 16px 0; }
+  .composer { padding: 12px 16px 16px; }
+  .msg-question { max-width: 88%; }
+  .msg-answer-wrap { max-width: 100%; }
+
+  .toast-stack {
+    left: 16px;
+    right: 16px;
+    bottom: 84px;
+    max-width: none;
   }
 }
 

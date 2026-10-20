@@ -15,7 +15,7 @@
 <div class="app-shell">
 
   <!-- ============ SIDEBAR: LIBRARY ============ -->
-  <aside class="library">
+  <aside class="library" id="library">
     <div class="library-header">
       <div class="brand">
         <span class="brand-mark">A</span>
@@ -31,8 +31,8 @@
     </div>
 
     <div class="dropzone" id="dropzone">
-      <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.csv,.jpg,.jpeg,.png,.webp,.gif,.bmp" hidden />
-      <p class="dropzone-title">Drop a document or image here</p>
+      <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.csv,.jpg,.jpeg,.png,.webp,.gif,.bmp" multiple hidden />
+      <p class="dropzone-title">Drop documents or images here</p>
       <p class="dropzone-sub">or click to browse — PDF, DOCX, TXT, CSV, JPG, PNG, WEBP, GIF</p>
     </div>
 
@@ -62,12 +62,16 @@
   <!-- ============ MAIN: READING ROOM ============ -->
   <main class="reading-room">
     <header class="room-header">
-      <div>
+      <button type="button" class="library-toggle" id="libraryToggle" aria-expanded="false" aria-controls="library">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+        <span>Documents</span><span class="library-toggle-count">0</span>
+      </button>
+      <div class="room-title">
         <h2>Reading room</h2>
         <p id="conversationMeta">New conversation</p>
       </div>
       <div class="room-header-actions">
-        <button class="btn-ghost" id="clearBtn">Clear conversation</button>
+        <button class="btn-ghost" id="clearBtn"><span class="label-long">Clear conversation</span><span class="label-short">New chat</span></button>
         <span class="user-chip" id="userChip" title="Signed in"></span>
         <button class="btn-ghost" id="logoutBtn">Log out</button>
       </div>
@@ -104,13 +108,19 @@
         rows="1"
         maxlength="4000"
       ></textarea>
+      <button type="button" class="btn-send btn-stop" id="stopBtn" aria-label="Stop generating" title="Stop generating" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>
+      </button>
       <button type="submit" class="btn-send" id="sendBtn" aria-label="Send question">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
       </button>
     </form>
   </main>
 
+  <div class="library-backdrop" id="libraryBackdrop"></div>
 </div>
+
+<div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
 <script src="auth.js"></script>
 <script src="app.js"></script>
